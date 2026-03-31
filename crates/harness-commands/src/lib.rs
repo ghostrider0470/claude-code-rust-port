@@ -65,3 +65,40 @@ impl CommandRegistry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seeded_registry_exposes_expected_command_names() {
+        let registry = CommandRegistry::seeded();
+        let names: Vec<_> = registry
+            .list()
+            .iter()
+            .map(|command| command.name.to_string())
+            .collect();
+
+        assert_eq!(names, vec!["review", "agents", "setup"]);
+    }
+
+    #[test]
+    fn execute_matches_seeded_commands_case_insensitively() {
+        let registry = CommandRegistry::seeded();
+        let result = registry.execute(&CommandName::new("REVIEW"), "review this PR");
+
+        assert!(result.handled);
+        assert_eq!(result.name.to_string(), "review");
+        assert!(result.message.contains("review this PR"));
+    }
+
+    #[test]
+    fn execute_reports_unknown_commands() {
+        let registry = CommandRegistry::seeded();
+        let result = registry.execute(&CommandName::new("deploy"), "ship it");
+
+        assert!(!result.handled);
+        assert_eq!(result.name.to_string(), "deploy");
+        assert_eq!(result.message, "unknown command: deploy");
+    }
+}

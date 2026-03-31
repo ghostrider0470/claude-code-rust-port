@@ -90,3 +90,46 @@ impl ToolRegistry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seeded_registry_exposes_expected_tool_names() {
+        let registry = ToolRegistry::seeded();
+        let names: Vec<_> = registry
+            .list()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+
+        assert_eq!(names, vec!["ReadFile", "EditFile", "Bash"]);
+    }
+
+    #[test]
+    fn execute_matches_seeded_tools_case_insensitively() {
+        let registry = ToolRegistry::seeded();
+        let result = registry.execute(&ToolName::new("bash"), "ls -la");
+
+        assert!(result.handled);
+        assert_eq!(result.name.to_string(), "Bash");
+        assert!(result.message.contains("ls -la"));
+    }
+
+    #[test]
+    fn permission_policy_denies_matching_prefixes_case_insensitively() {
+        let policy = PermissionPolicy::with_denied_prefixes(["bash", "edit"]);
+        let denial = policy.denial_for(&ToolName::new("BashInteractive"));
+
+        assert_eq!(policy.denied_prefixes(), &["bash".to_string(), "edit".to_string()]);
+        assert_eq!(
+            denial,
+            Some(PermissionDenial {
+                subject: "BashInteractive".to_string(),
+                reason: "tool blocked by permission policy".to_string(),
+            })
+        );
+        assert_eq!(policy.denial_for(&ToolName::new("ReadFile")), None);
+    }
+}
