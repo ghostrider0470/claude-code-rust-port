@@ -33,10 +33,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("bootstrap runtime turn");
             serde_json::to_string_pretty(&report).expect("serialize bootstrap report")
         }
-        CliCommand::Tools => serde_json::to_string_pretty(engine.tools.list())
-            .expect("serialize tool list"),
-        CliCommand::Commands => serde_json::to_string_pretty(engine.commands.list())
-            .expect("serialize command list"),
+        CliCommand::Tools => {
+            serde_json::to_string_pretty(engine.tools.list()).expect("serialize tool list")
+        }
+        CliCommand::Commands => {
+            serde_json::to_string_pretty(engine.commands.list()).expect("serialize command list")
+        }
         CliCommand::SessionShow { id } => {
             let session = engine.load_session(&id).expect("load session by id");
             serde_json::to_string_pretty(&session).expect("serialize session")
@@ -54,13 +56,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{render_command, CliCommand};
-    use harness_commands::{CommandDefinition, CommandRegistry};
-    use harness_session::{SessionState, SessionStore};
-    use harness_tools::{PermissionPolicy, ToolDefinition, ToolRegistry};
+    use harness_commands::CommandRegistry;
     use harness_runtime::RuntimeEngine;
+    use harness_session::{SessionState, SessionStore};
+    use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    const README: &str = include_str!("../../../README.md");
 
     fn temp_session_root() -> PathBuf {
         let nonce = SystemTime::now()
@@ -79,20 +83,55 @@ mod tests {
         }
     }
 
+    fn normalized_readme() -> String {
+        README.replace("\r\n", "\n")
+    }
+
+    fn readme_output_block(heading: &str, language: &str) -> String {
+        let readme = normalized_readme();
+        let marker = format!("### `{heading}`");
+        let section = readme
+            .split(&marker)
+            .nth(1)
+            .and_then(|after_heading| after_heading.split("\n### ").next())
+            .expect("README section should exist");
+        let fence = format!("```{language}\n");
+        let after_fence = section
+            .split(&fence)
+            .nth(1)
+            .expect("README output block should exist");
+
+        after_fence
+            .split("\n```")
+            .next()
+            .expect("README output fence should close")
+            .to_string()
+    }
+
+    fn normalize_bootstrap_example(output: &str, session_id: &str, root: &PathBuf) -> String {
+        output
+            .replace(session_id, "<session-id>")
+            .replace(root.to_string_lossy().as_ref(), ".sessions")
+    }
+
+    fn normalize_session_output(output: &str, session_id: &str) -> String {
+        output.replace(session_id, "<session-id>")
+    }
+
     #[test]
-    fn summary_renders_seeded_runtime_counts() {
+    fn summary_matches_readme_example() {
         let root = temp_session_root();
         let engine = temp_engine(&root);
 
         let output = render_command(&engine, CliCommand::Summary);
 
-        assert_eq!(output, "commands=3 tools=3 denied_prefixes=bash");
+        assert_eq!(output, readme_output_block("summary", "text"));
 
         fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn route_renders_seeded_runtime_matches_json() {
+    fn route_matches_readme_example() {
         let root = temp_session_root();
         let engine = temp_engine(&root);
 
@@ -102,72 +141,41 @@ mod tests {
                 prompt: "review bash".to_string(),
             },
         );
-        let routed: serde_json::Value = serde_json::from_str(&output).expect("parse route output");
 
         assert_eq!(
-            routed,
-            serde_json::json!([
-                {
-                    "kind": "command",
-                    "name": "review",
-                    "score": 1
-                },
-                {
-                    "kind": "tool",
-                    "name": "Bash",
-                    "score": 1
-                }
-            ])
+            output,
+            readme_output_block("route \"review bash\"", "json")
         );
 
         fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn tools_renders_seeded_tool_registry_json() {
+    fn tools_match_readme_example() {
         let root = temp_session_root();
         let engine = temp_engine(&root);
 
         let output = render_command(&engine, CliCommand::Tools);
-        let tools: Vec<ToolDefinition> = serde_json::from_str(&output).expect("parse tool list");
 
-        let names: Vec<String> = tools.into_iter().map(|tool| tool.name.0).collect();
-        assert_eq!(
-            names,
-            vec![
-                "ReadFile".to_string(),
-                "EditFile".to_string(),
-                "Bash".to_string()
-            ]
-        );
+        assert_eq!(output, readme_output_block("tools", "json"));
 
         fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn commands_renders_seeded_command_registry_json() {
+    fn commands_match_readme_example() {
         let root = temp_session_root();
         let engine = temp_engine(&root);
 
         let output = render_command(&engine, CliCommand::Commands);
-        let commands: Vec<CommandDefinition> =
-            serde_json::from_str(&output).expect("parse command list");
 
-        let names: Vec<String> = commands.into_iter().map(|command| command.name.0).collect();
-        assert_eq!(
-            names,
-            vec![
-                "review".to_string(),
-                "agents".to_string(),
-                "setup".to_string()
-            ]
-        );
+        assert_eq!(output, readme_output_block("commands", "json"));
 
         fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn bootstrap_then_session_show_round_trips_persisted_session_json() {
+    fn bootstrap_and_session_show_match_readme_examples() {
         let root = temp_session_root();
         let engine = temp_engine(&root);
 
@@ -184,6 +192,11 @@ mod tests {
             .expect("session id in bootstrap output")
             .to_string();
 
+        assert_eq!(
+            normalize_bootstrap_example(&bootstrap_output, &session_id, &root),
+            readme_output_block("bootstrap \"review bash\"", "json")
+        );
+
         let session_output = render_command(
             &engine,
             CliCommand::SessionShow {
@@ -195,12 +208,8 @@ mod tests {
 
         assert_eq!(session.session_id.to_string(), session_id);
         assert_eq!(
-            session
-                .messages
-                .into_iter()
-                .map(|prompt| prompt.0)
-                .collect::<Vec<_>>(),
-            vec!["review bash".to_string()]
+            normalize_session_output(&session_output, &session_id),
+            readme_output_block("session-show <id>", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
