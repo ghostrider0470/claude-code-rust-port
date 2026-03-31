@@ -225,3 +225,87 @@ impl RuntimeEngine {
         self.store.load(id).map_err(|err| err.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MatchKind, RuntimeEngine};
+    use harness_commands::CommandRegistry;
+    use harness_core::{Prompt, RuntimeEvent};
+    use harness_session::SessionStore;
+    use harness_tools::{PermissionPolicy, ToolRegistry};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_session_root() -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("harness-runtime-tests-{nonce}"))
+    }
+
+    #[test]
+    fn route_orders_matches_deterministically() {
+        let engine = RuntimeEngine::default();
+
+        let matches = engine.route(&Prompt::new("review bash file"));
+        let ordered: Vec<(MatchKind, String, usize)> = matches
+            .into_iter()
+            .map(|matched| (matched.kind, matched.name, matched.score.0))
+            .collect();
+
+        assert_eq!(
+            ordered,
+            vec![
+                (MatchKind::Command, "review".to_string(), 1),
+                (MatchKind::Tool, "Bash".to_string(), 1),
+                (MatchKind::Tool, "EditFile".to_string(), 1),
+                (MatchKind::Tool, "ReadFile".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn bootstrap_emits_denial_and_persists_session_state() {
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let report = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap runtime turn");
+        let reloaded = engine
+            .load_session(&report.session.session_id.to_string())
+            .expect("reload persisted session");
+
+        assert_eq!(report.command_results.len(), 1);
+        assert_eq!(report.command_results[0].name.0, "review");
+        assert!(report.command_results[0].handled);
+
+        assert_eq!(report.denials.len(), 1);
+        assert_eq!(report.denials[0].subject, "Bash");
+        assert_eq!(report.tool_results.len(), 0);
+
+        assert!(report.transcript.flushed);
+        assert_eq!(report.session.messages, vec![Prompt::new("review bash")]);
+        assert_eq!(reloaded, report.session);
+        assert!(report.persisted_path.starts_with(root.to_string_lossy().as_ref()));
+
+        assert!(report.events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::PermissionDenied { subject, reason }
+                if subject == "Bash" && reason == "tool blocked by permission policy"
+        )));
+        assert!(report.events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::SessionPersisted { path }
+                if path == &report.persisted_path
+        )));
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+}
