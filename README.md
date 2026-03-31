@@ -15,7 +15,7 @@ The repository already contains:
 - architecture and implementation planning docs
 - snapshot/reference material used to understand architectural surfaces
 
-The repository is still early. The real MVP runtime lane is tracked in issue #1.
+The repository is still early, but the Rust MVP lane is already partially implemented and tracked incrementally through the active GitHub issue queue.
 
 ## Workspace Layout
 
@@ -53,7 +53,7 @@ See:
 
 - `ARCHITECTURE.md`
 - `PORTING_PLAN.md`
-- issue #1
+- the active GitHub issue queue for the next atomic slice
 
 ## Quickstart
 
@@ -68,6 +68,7 @@ Run tests:
 ```bash
 cargo test -p harness-session
 cargo test -p harness-runtime
+cargo test -p harness-cli
 cargo test
 ```
 
@@ -91,16 +92,20 @@ Current protected Rust surface:
 - transcript compaction behavior in `harness-session`
 - deterministic route ordering in `harness-runtime`
 - bootstrap permission denial + session persistence behavior in `harness-runtime`
+- CLI summary output for the seeded runtime surface
+- CLI JSON inspection output for `tools` and `commands`
+- CLI persisted-session round trip through `bootstrap` + `session-show`
 
 Validation commands:
 
 ```bash
 cargo test -p harness-session
 cargo test -p harness-runtime
+cargo test -p harness-cli
 cargo test
 ```
 
-More runtime and CLI coverage will be added incrementally under issue #6.
+More runtime and CLI coverage should continue incrementally through the active issue queue.
 
 ## Development Workflow
 
@@ -119,9 +124,9 @@ This repo is a clean-room implementation effort informed by architectural study.
 
 - [x] architecture capture
 - [x] workspace bootstrap
-- [ ] core domain types
-- [ ] session/transcript persistence
-- [ ] registries
-- [ ] router/runtime loop
-- [ ] CLI inspection surface
+- [x] core domain types
+- [x] session/transcript persistence
+- [x] registries
+- [x] router/runtime loop
+- [x] CLI inspection surface
 - [ ] cleanup of obsolete Python-first scaffolding

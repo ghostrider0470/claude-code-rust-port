@@ -13,56 +13,56 @@ Rewrite the current repository into a Rust-native harness runtime that learns fr
 
 ## Phase 2 - Rust Workspace Bootstrap
 
-- [ ] Create workspace `Cargo.toml`
-- [ ] Create crates:
-  - [ ] `harness-core`
-  - [ ] `harness-session`
-  - [ ] `harness-tools`
-  - [ ] `harness-commands`
-  - [ ] `harness-runtime`
-  - [ ] `harness-cli`
-- [ ] Add shared dependencies (`serde`, `serde_json`, `clap`, `thiserror`, etc.)
-- [ ] Ensure `cargo check` passes
+- [x] Create workspace `Cargo.toml`
+- [x] Create crates:
+  - [x] `harness-core`
+  - [x] `harness-session`
+  - [x] `harness-tools`
+  - [x] `harness-commands`
+  - [x] `harness-runtime`
+  - [x] `harness-cli`
+- [x] Add shared dependencies (`serde`, `serde_json`, `clap`, `thiserror`, etc.)
+- [x] Ensure `cargo check` passes
 
 ## Phase 3 - Core Types
 
-- [ ] Implement ids and metadata types
-- [ ] Implement usage/accounting types
-- [ ] Implement error model
-- [ ] Implement event enums
+- [x] Implement ids and metadata types
+- [x] Implement usage/accounting types
+- [x] Implement error model
+- [x] Implement event enums
 
 ## Phase 4 - Session + Transcript
 
-- [ ] `SessionState`
-- [ ] `TranscriptEntry`
-- [ ] append/replay/compact
-- [ ] persistence to disk
-- [ ] session reload
+- [x] `SessionState`
+- [x] `TranscriptEntry`
+- [x] append/replay/compact
+- [x] persistence to disk
+- [x] session reload
 
 ## Phase 5 - Registries
 
-- [ ] Tool registry with metadata
-- [ ] Command registry with metadata
-- [ ] Search/filter/list APIs
-- [ ] Permission policy layer
+- [x] Tool registry with metadata
+- [x] Command registry with metadata
+- [x] Search/filter/list APIs
+- [x] Permission policy layer
 
 ## Phase 6 - Router + Runtime
 
-- [ ] Prompt tokenization
-- [ ] Match scoring
-- [ ] Deterministic ranking
-- [ ] Turn processor
-- [ ] Event emission
-- [ ] Session persistence after turn
+- [x] Prompt tokenization
+- [x] Match scoring
+- [x] Deterministic ranking
+- [x] Turn processor
+- [x] Event emission
+- [x] Session persistence after turn
 
 ## Phase 7 - CLI
 
-- [ ] `summary`
-- [ ] `route <prompt>`
-- [ ] `bootstrap <prompt>`
-- [ ] `tools list`
-- [ ] `commands list`
-- [ ] `session show <id>`
+- [x] `summary`
+- [x] `route <prompt>`
+- [x] `bootstrap <prompt>`
+- [x] `tools list`
+- [x] `commands list`
+- [x] `session show <id>`
 
 ## Phase 8 - Cleanup
 
@@ -81,9 +81,8 @@ Rewrite the current repository into a Rust-native harness runtime that learns fr
 
 ## Immediate Next Slice
 
-1. bootstrap Cargo workspace
-2. create core crates
-3. implement minimal typed models
-4. wire a first compiling CLI
-5. validate with `cargo check`
+1. remove obsolete Python-first scaffolding that no longer represents the active runtime lane
+2. add focused coverage for remaining zero-test crates or CLI route output
+3. expand README/examples for real CLI usage and validation flow
+4. keep each follow-up slice tied to a GitHub issue and PR
 
