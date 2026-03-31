@@ -66,8 +66,8 @@ Rewrite the current repository into a Rust-native harness runtime that learns fr
 
 ## Phase 8 - Cleanup
 
-- [ ] Remove obsolete Python-first scaffolding
-- [ ] Rewrite README for Rust-first identity
+- [x] Remove obsolete Python-first scaffolding
+- [x] Rewrite README for Rust-first identity
 - [ ] Add examples and usage docs
 
 ## Engineering Rules
@@ -81,8 +81,8 @@ Rewrite the current repository into a Rust-native harness runtime that learns fr
 
 ## Immediate Next Slice
 
-1. remove obsolete Python-first scaffolding that no longer represents the active runtime lane
-2. add focused coverage for remaining zero-test crates or CLI route output
-3. expand README/examples for real CLI usage and validation flow
+1. add focused coverage for remaining zero-test crates or CLI `route` output
+2. expand README/examples for real CLI usage and validation flow
+3. decide whether `src/reference_data/` should remain in-tree or move under a clearer archival path
 4. keep each follow-up slice tied to a GitHub issue and PR
 
