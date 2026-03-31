@@ -1,0 +1,13 @@
+[package]
+name = "harness-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+harness-commands = { path = "../harness-commands" }
+harness-core = { path = "../harness-core" }
+harness-session = { path = "../harness-session" }
+harness-tools = { path = "../harness-tools" }
+serde.workspace = true

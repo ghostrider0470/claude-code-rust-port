@@ -1,0 +1,10 @@
+[package]
+name = "harness-tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+harness-core = { path = "../harness-core" }
+serde.workspace = true
