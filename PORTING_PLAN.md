@@ -81,7 +81,7 @@ Rewrite the current repository into a Rust-native harness runtime that learns fr
 
 ## Immediate Next Slice
 
-1. add focused coverage for CLI `route` output or example-driven CLI docs regression tests
-2. decide whether `src/reference_data/` should remain in-tree or move under a clearer archival path
+1. decide whether `src/reference_data/` should remain in-tree or move under a clearer archival path
+2. add example-driven CLI docs regression tests if the visible CLI surface grows beyond the current baseline
 3. expand README/ARCHITECTURE examples if the CLI surface changes
 4. keep each follow-up slice tied to a GitHub issue and PR
