@@ -152,3 +152,33 @@ pub enum RuntimeError {
 pub fn estimate_tokens(text: &str) -> usize {
     text.split_whitespace().count().max(1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_and_names_expose_string_views() {
+        let prompt = Prompt::new("review this diff");
+        let tool = ToolName::new("ReadFile");
+        let command = CommandName::new("review");
+
+        assert_eq!(prompt.as_str(), "review this diff");
+        assert_eq!(tool.to_string(), "ReadFile");
+        assert_eq!(command.to_string(), "review");
+    }
+
+    #[test]
+    fn usage_summary_accumulates_estimated_tokens() {
+        let usage = UsageSummary::default().add_turn("review this", "looks good");
+
+        assert_eq!(usage.input_tokens, 2);
+        assert_eq!(usage.output_tokens, 2);
+    }
+
+    #[test]
+    fn estimate_tokens_never_returns_zero() {
+        assert_eq!(estimate_tokens(""), 1);
+        assert_eq!(estimate_tokens("one two three"), 3);
+    }
+}

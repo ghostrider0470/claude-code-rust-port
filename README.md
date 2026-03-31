@@ -64,6 +64,9 @@ cargo check
 Run tests:
 
 ```bash
+cargo test -p harness-core
+cargo test -p harness-tools
+cargo test -p harness-commands
 cargo test -p harness-session
 cargo test -p harness-runtime
 cargo test -p harness-cli
@@ -86,6 +89,9 @@ cargo run -p harness-cli -- --help
 
 Current protected Rust surface:
 
+- `harness-core` prompt/name wrappers and token accounting helpers
+- seeded tool registry behavior plus permission-policy prefix denial in `harness-tools`
+- seeded command registry behavior in `harness-commands`
 - `harness-session` save/load round-trip persistence
 - transcript compaction behavior in `harness-session`
 - deterministic route ordering in `harness-runtime`
@@ -97,6 +103,9 @@ Current protected Rust surface:
 Validation commands:
 
 ```bash
+cargo test -p harness-core
+cargo test -p harness-tools
+cargo test -p harness-commands
 cargo test -p harness-session
 cargo test -p harness-runtime
 cargo test -p harness-cli
