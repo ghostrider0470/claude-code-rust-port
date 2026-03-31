@@ -314,6 +314,7 @@ Current protected Rust surface:
 - deterministic route ordering in `harness-runtime`
 - bootstrap permission denial + session persistence behavior in `harness-runtime`
 - CLI summary output for the seeded runtime surface
+- CLI deterministic JSON output for `route <prompt>`
 - CLI JSON inspection output for `tools` and `commands`
 - CLI persisted-session round trip through `bootstrap` + `session-show`
 

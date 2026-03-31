@@ -92,6 +92,38 @@ mod tests {
     }
 
     #[test]
+    fn route_renders_seeded_runtime_matches_json() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let output = render_command(
+            &engine,
+            CliCommand::Route {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let routed: serde_json::Value = serde_json::from_str(&output).expect("parse route output");
+
+        assert_eq!(
+            routed,
+            serde_json::json!([
+                {
+                    "kind": "command",
+                    "name": "review",
+                    "score": 1
+                },
+                {
+                    "kind": "tool",
+                    "name": "Bash",
+                    "score": 1
+                }
+            ])
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn tools_renders_seeded_tool_registry_json() {
         let root = temp_session_root();
         let engine = temp_engine(&root);
