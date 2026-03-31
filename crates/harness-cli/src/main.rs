@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use harness_core::Prompt;
 use harness_runtime::RuntimeEngine;
 
 #[derive(Debug, Parser)]
@@ -28,28 +29,40 @@ fn main() {
             println!("{}", engine.summary());
         }
         CliCommand::Route { prompt } => {
-            let matches = engine.route(&prompt);
-            println!("{}", serde_json::to_string_pretty(&matches).unwrap());
+            let matches = engine.route(&Prompt::new(prompt));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&matches).expect("serialize route result")
+            );
         }
         CliCommand::Bootstrap { prompt } => {
-            let report = engine.bootstrap(&prompt).unwrap();
-            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            let report = engine
+                .bootstrap(Prompt::new(prompt))
+                .expect("bootstrap runtime turn");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).expect("serialize bootstrap report")
+            );
         }
         CliCommand::Tools => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(engine.tools.list()).unwrap()
+                serde_json::to_string_pretty(engine.tools.list()).expect("serialize tool list")
             );
         }
         CliCommand::Commands => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(engine.commands.list()).unwrap()
+                serde_json::to_string_pretty(engine.commands.list())
+                    .expect("serialize command list")
             );
         }
         CliCommand::SessionShow { id } => {
-            let session = engine.load_session(&id).unwrap();
-            println!("{}", serde_json::to_string_pretty(&session).unwrap());
+            let session = engine.load_session(&id).expect("load session by id");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&session).expect("serialize session")
+            );
         }
     }
 }

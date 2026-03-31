@@ -153,6 +153,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "harness-commands",
+ "harness-core",
  "harness-runtime",
  "harness-session",
  "harness-tools",

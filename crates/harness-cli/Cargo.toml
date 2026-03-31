@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 clap.workspace = true
+harness-core = { path = "../harness-core" }
 harness-commands = { path = "../harness-commands" }
 harness-runtime = { path = "../harness-runtime" }
 harness-session = { path = "../harness-session" }

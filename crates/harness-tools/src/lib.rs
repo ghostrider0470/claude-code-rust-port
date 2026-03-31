@@ -1,15 +1,15 @@
-use harness_core::PermissionDenial;
+use harness_core::{PermissionDenial, ToolName};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDefinition {
-    pub name: String,
+    pub name: ToolName,
     pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolResult {
-    pub name: String,
+    pub name: ToolName,
     pub handled: bool,
     pub message: String,
 }
@@ -26,8 +26,8 @@ impl PermissionPolicy {
         }
     }
 
-    pub fn denial_for(&self, tool_name: &str) -> Option<PermissionDenial> {
-        let lowered = tool_name.to_ascii_lowercase();
+    pub fn denial_for(&self, tool_name: &ToolName) -> Option<PermissionDenial> {
+        let lowered = tool_name.0.to_ascii_lowercase();
         self.denied_prefixes
             .iter()
             .find(|prefix| lowered.starts_with(&prefix.to_ascii_lowercase()))
@@ -35,6 +35,10 @@ impl PermissionPolicy {
                 subject: tool_name.to_string(),
                 reason: "tool blocked by permission policy".to_string(),
             })
+    }
+
+    pub fn denied_prefixes(&self) -> &[String] {
+        &self.denied_prefixes
     }
 }
 
@@ -48,15 +52,15 @@ impl ToolRegistry {
         Self {
             tools: vec![
                 ToolDefinition {
-                    name: "ReadFile".into(),
+                    name: ToolName::new("ReadFile"),
                     description: "Read a file from disk".into(),
                 },
                 ToolDefinition {
-                    name: "EditFile".into(),
+                    name: ToolName::new("EditFile"),
                     description: "Edit a file on disk".into(),
                 },
                 ToolDefinition {
-                    name: "Bash".into(),
+                    name: ToolName::new("Bash"),
                     description: "Execute shell commands".into(),
                 },
             ],
@@ -67,23 +71,11 @@ impl ToolRegistry {
         &self.tools
     }
 
-    pub fn find(&self, query: &str) -> Vec<ToolDefinition> {
-        let needle = query.to_ascii_lowercase();
-        self.tools
-            .iter()
-            .filter(|tool| {
-                tool.name.to_ascii_lowercase().contains(&needle)
-                    || tool.description.to_ascii_lowercase().contains(&needle)
-            })
-            .cloned()
-            .collect()
-    }
-
-    pub fn execute(&self, name: &str, payload: &str) -> ToolResult {
+    pub fn execute(&self, name: &ToolName, payload: &str) -> ToolResult {
         match self
             .tools
             .iter()
-            .find(|tool| tool.name.eq_ignore_ascii_case(name))
+            .find(|tool| tool.name.0.eq_ignore_ascii_case(&name.0))
         {
             Some(tool) => ToolResult {
                 name: tool.name.clone(),
@@ -91,7 +83,7 @@ impl ToolRegistry {
                 message: format!("tool '{}' would handle payload {:?}", tool.name, payload),
             },
             None => ToolResult {
-                name: name.to_string(),
+                name: name.clone(),
                 handled: false,
                 message: format!("unknown tool: {}", name),
             },
