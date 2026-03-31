@@ -66,6 +66,7 @@ cargo check
 Run tests:
 
 ```bash
+cargo test -p harness-session
 cargo test
 ```
 
@@ -80,6 +81,22 @@ Run the CLI:
 ```bash
 cargo run -p harness-cli -- --help
 ```
+
+## Rust Test Coverage Baseline
+
+Current protected Rust surface:
+
+- `harness-session` save/load round-trip persistence
+- transcript compaction behavior in `harness-session`
+
+Validation commands:
+
+```bash
+cargo test -p harness-session
+cargo test
+```
+
+More runtime and CLI coverage will be added incrementally under issue #6.
 
 ## Development Workflow
 
