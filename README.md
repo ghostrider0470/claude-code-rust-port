@@ -36,6 +36,10 @@ The repository is still early, but the Rust MVP lane is already partially implem
     └── reference_data/
 ```
 
+## Reference Data Note
+
+`src/reference_data/` is retained in-tree as archival JSON snapshot material from the architecture study. It is useful for design context and documentation, but it is not part of the active Rust runtime path.
+
 ## Rust MVP Target
 
 The first meaningful milestone is:
@@ -85,6 +89,219 @@ Run the CLI:
 cargo run -p harness-cli -- --help
 ```
 
+## CLI Usage Examples
+
+The examples below reflect the current seeded runtime surface. `bootstrap` creates a session file under `.sessions/`, which is gitignored. Session IDs will differ on each run.
+
+### `summary`
+
+```bash
+cargo run -q -p harness-cli -- summary
+```
+
+```text
+commands=3 tools=3 denied_prefixes=bash
+```
+
+### `route "review bash"`
+
+```bash
+cargo run -q -p harness-cli -- route "review bash"
+```
+
+```json
+[
+  {
+    "kind": "command",
+    "name": "review",
+    "score": 1
+  },
+  {
+    "kind": "tool",
+    "name": "Bash",
+    "score": 1
+  }
+]
+```
+
+### `tools`
+
+```bash
+cargo run -q -p harness-cli -- tools
+```
+
+```json
+[
+  {
+    "name": "ReadFile",
+    "description": "Read a file from disk"
+  },
+  {
+    "name": "EditFile",
+    "description": "Edit a file on disk"
+  },
+  {
+    "name": "Bash",
+    "description": "Execute shell commands"
+  }
+]
+```
+
+### `commands`
+
+```bash
+cargo run -q -p harness-cli -- commands
+```
+
+```json
+[
+  {
+    "name": "review",
+    "description": "Review code or diffs"
+  },
+  {
+    "name": "agents",
+    "description": "Inspect agent state"
+  },
+  {
+    "name": "setup",
+    "description": "Show runtime setup state"
+  }
+]
+```
+
+### `bootstrap "review bash"`
+
+```bash
+cargo run -q -p harness-cli -- bootstrap "review bash"
+```
+
+```json
+{
+  "session": {
+    "session_id": "3381e9f9-1883-4d04-8d48-7b63e64f082e",
+    "messages": [
+      "review bash"
+    ],
+    "usage": {
+      "input_tokens": 2,
+      "output_tokens": 2
+    }
+  },
+  "transcript": {
+    "entries": [
+      {
+        "turn_index": 0,
+        "prompt": "review bash"
+      }
+    ],
+    "flushed": true
+  },
+  "matches": [
+    {
+      "kind": "command",
+      "name": "review",
+      "score": 1
+    },
+    {
+      "kind": "tool",
+      "name": "Bash",
+      "score": 1
+    }
+  ],
+  "denials": [
+    {
+      "subject": "Bash",
+      "reason": "tool blocked by permission policy"
+    }
+  ],
+  "command_results": [
+    {
+      "name": "review",
+      "handled": true,
+      "message": "command 'review' would handle prompt \"review bash\""
+    }
+  ],
+  "tool_results": [],
+  "events": [
+    {
+      "SessionStarted": {
+        "session_id": "3381e9f9-1883-4d04-8d48-7b63e64f082e"
+      }
+    },
+    {
+      "PromptReceived": {
+        "prompt": "review bash"
+      }
+    },
+    {
+      "RouteComputed": {
+        "match_count": 2
+      }
+    },
+    {
+      "CommandMatched": {
+        "name": "review",
+        "score": 1
+      }
+    },
+    {
+      "ToolMatched": {
+        "name": "Bash",
+        "score": 1
+      }
+    },
+    {
+      "PermissionDenied": {
+        "subject": "Bash",
+        "reason": "tool blocked by permission policy"
+      }
+    },
+    {
+      "CommandInvoked": {
+        "name": "review"
+      }
+    },
+    {
+      "CommandCompleted": {
+        "name": "review",
+        "handled": true
+      }
+    },
+    {
+      "TurnCompleted": {
+        "stop_reason": "completed"
+      }
+    },
+    {
+      "SessionPersisted": {
+        "path": ".sessions/3381e9f9-1883-4d04-8d48-7b63e64f082e.json"
+      }
+    }
+  ],
+  "persisted_path": ".sessions/3381e9f9-1883-4d04-8d48-7b63e64f082e.json"
+}
+```
+
+### `session-show <id>`
+
+```bash
+cargo run -q -p harness-cli -- session-show 3381e9f9-1883-4d04-8d48-7b63e64f082e
+```
+
+```json
+{
+  "session_id": "3381e9f9-1883-4d04-8d48-7b63e64f082e",
+  "messages": [
+    "review bash"
+  ],
+  "usage": {
+    "input_tokens": 2,
+    "output_tokens": 2
+  }
+}
+```
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -114,6 +331,18 @@ cargo test
 
 More runtime and CLI coverage should continue incrementally through the active issue queue.
 
+## Validation Flow
+
+Use the smallest validation command that proves the touched surface, then widen only when the slice needs it:
+
+1. `cargo check` for fast workspace sanity
+2. targeted `cargo test -p <crate>` for the crate you changed
+3. `cargo run -q -p harness-cli -- <command>` when a CLI-facing slice changes visible behavior or docs
+4. `cargo test` before merge when the change crosses crate boundaries or updates shared runtime behavior
+5. `cargo clippy --workspace --all-targets -- -D warnings` for code-heavy slices before final merge
+
+For this repository, documentation is part of done. If README examples or command descriptions change, validate them against the actual CLI output before opening the PR.
+
 ## Development Workflow
 
 1. create an issue for the slice
@@ -136,4 +365,6 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] registries
 - [x] router/runtime loop
 - [x] CLI inspection surface
+- [x] CLI usage examples and validation flow
 - [x] cleanup of obsolete Python-first scaffolding
+- [ ] decide long-term archival placement for `src/reference_data/`

@@ -60,15 +60,15 @@ Rewrite the current repository into a Rust-native harness runtime that learns fr
 - [x] `summary`
 - [x] `route <prompt>`
 - [x] `bootstrap <prompt>`
-- [x] `tools list`
-- [x] `commands list`
-- [x] `session show <id>`
+- [x] `tools`
+- [x] `commands`
+- [x] `session-show <id>`
 
 ## Phase 8 - Cleanup
 
 - [x] Remove obsolete Python-first scaffolding
 - [x] Rewrite README for Rust-first identity
-- [ ] Add examples and usage docs
+- [x] Add examples and usage docs
 
 ## Engineering Rules
 
@@ -81,8 +81,7 @@ Rewrite the current repository into a Rust-native harness runtime that learns fr
 
 ## Immediate Next Slice
 
-1. add focused coverage for remaining zero-test crates or CLI `route` output
-2. expand README/examples for real CLI usage and validation flow
-3. decide whether `src/reference_data/` should remain in-tree or move under a clearer archival path
+1. add focused coverage for CLI `route` output or example-driven CLI docs regression tests
+2. decide whether `src/reference_data/` should remain in-tree or move under a clearer archival path
+3. expand README/ARCHITECTURE examples if the CLI surface changes
 4. keep each follow-up slice tied to a GitHub issue and PR
-
