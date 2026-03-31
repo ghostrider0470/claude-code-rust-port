@@ -67,6 +67,7 @@ Run tests:
 
 ```bash
 cargo test -p harness-session
+cargo test -p harness-runtime
 cargo test
 ```
 
@@ -88,11 +89,14 @@ Current protected Rust surface:
 
 - `harness-session` save/load round-trip persistence
 - transcript compaction behavior in `harness-session`
+- deterministic route ordering in `harness-runtime`
+- bootstrap permission denial + session persistence behavior in `harness-runtime`
 
 Validation commands:
 
 ```bash
 cargo test -p harness-session
+cargo test -p harness-runtime
 cargo test
 ```
 
