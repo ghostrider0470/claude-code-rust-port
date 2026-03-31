@@ -91,3 +91,62 @@ impl SessionStore {
         serde_json::from_str(&body).map_err(|err| RuntimeError::Serialization(err.to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionState, SessionStore, TranscriptStore};
+    use harness_core::{Prompt, SessionId};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_session_root() -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("harness-session-tests-{nonce}"))
+    }
+
+    #[test]
+    fn saves_and_loads_session_state_round_trip() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+        let session = SessionState {
+            session_id: SessionId::new(),
+            messages: vec![Prompt::new("review the runtime lane")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 4,
+                output_tokens: 2,
+            },
+        };
+
+        let saved_path = store.save(&session).expect("save session state");
+        let loaded = store
+            .load(&session.session_id.to_string())
+            .expect("load session state");
+
+        assert_eq!(saved_path, root.join(format!("{}.json", session.session_id)));
+        assert_eq!(loaded, session);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn transcript_compaction_keeps_most_recent_entries() {
+        let mut transcript = TranscriptStore::default();
+        transcript.append(Prompt::new("first"));
+        transcript.append(Prompt::new("second"));
+        transcript.append(Prompt::new("third"));
+
+        transcript.compact(2);
+
+        let prompts: Vec<String> = transcript
+            .replay()
+            .into_iter()
+            .map(|prompt| prompt.0)
+            .collect();
+
+        assert_eq!(prompts, vec!["second".to_string(), "third".to_string()]);
+        assert!(!transcript.flushed);
+    }
+}
