@@ -4,7 +4,7 @@ Rust-first harness runtime research and implementation workspace.
 
 ## Purpose
 
-This repository studies the exposed Claude Code architecture at the systems level and rebuilds the useful harness ideas as an original Rust-native runtime. The target is not path parity or source transliteration. The target is a typed, inspectable, reusable agent runtime that can later donate components into Horizon/Rune.
+This repository studies the exposed Claude Code architecture at the systems level and rebuilds the useful harness ideas as an original Rust-native CLI/runtime. The target is not path parity or source transliteration. The primary target is a usable, inspectable Claude Code-style CLI Hamza can run directly; clean reusable runtime components are a secondary outcome that can later donate into Horizon/Rune.
 
 ## Current Status
 
@@ -91,7 +91,7 @@ cargo run -p harness-cli -- --help
 
 ## CLI Usage Examples
 
-The examples below reflect the current seeded runtime surface. `bootstrap` creates a session file under `.sessions/`, which is gitignored. Session IDs will differ on each run.
+The examples below reflect the current seeded runtime surface and are protected by `cargo test -p harness-cli`. `bootstrap` creates a session file under `.sessions/`, which is gitignored, so the README uses the stable placeholder `<session-id>` (and matching persisted path) for the generated values that vary per run.
 
 ### `summary`
 
@@ -179,7 +179,7 @@ cargo run -q -p harness-cli -- bootstrap "review bash"
 ```json
 {
   "session": {
-    "session_id": "3381e9f9-1883-4d04-8d48-7b63e64f082e",
+    "session_id": "<session-id>",
     "messages": [
       "review bash"
     ],
@@ -226,7 +226,7 @@ cargo run -q -p harness-cli -- bootstrap "review bash"
   "events": [
     {
       "SessionStarted": {
-        "session_id": "3381e9f9-1883-4d04-8d48-7b63e64f082e"
+        "session_id": "<session-id>"
       }
     },
     {
@@ -275,23 +275,23 @@ cargo run -q -p harness-cli -- bootstrap "review bash"
     },
     {
       "SessionPersisted": {
-        "path": ".sessions/3381e9f9-1883-4d04-8d48-7b63e64f082e.json"
+        "path": ".sessions/<session-id>.json"
       }
     }
   ],
-  "persisted_path": ".sessions/3381e9f9-1883-4d04-8d48-7b63e64f082e.json"
+  "persisted_path": ".sessions/<session-id>.json"
 }
 ```
 
 ### `session-show <id>`
 
 ```bash
-cargo run -q -p harness-cli -- session-show 3381e9f9-1883-4d04-8d48-7b63e64f082e
+cargo run -q -p harness-cli -- session-show <session-id>
 ```
 
 ```json
 {
-  "session_id": "3381e9f9-1883-4d04-8d48-7b63e64f082e",
+  "session_id": "<session-id>",
   "messages": [
     "review bash"
   ],
@@ -313,10 +313,8 @@ Current protected Rust surface:
 - transcript compaction behavior in `harness-session`
 - deterministic route ordering in `harness-runtime`
 - bootstrap permission denial + session persistence behavior in `harness-runtime`
-- CLI summary output for the seeded runtime surface
-- CLI deterministic JSON output for `route <prompt>`
-- CLI JSON inspection output for `tools` and `commands`
-- CLI persisted-session round trip through `bootstrap` + `session-show`
+- README-backed CLI output regression coverage for `summary`, `route <prompt>`, `tools`, and `commands`
+- README-backed persisted-session example coverage for `bootstrap <prompt>` and `session-show <id>`, with generated session identifiers normalized to `<session-id>` in test assertions
 
 Validation commands:
 
@@ -331,6 +329,8 @@ cargo test
 ```
 
 More runtime and CLI coverage should continue incrementally through the active issue queue.
+
+The CLI example blocks above are a protected regression surface: if visible seeded output changes, update the README and the `harness-cli` example tests in the same PR.
 
 ## Validation Flow
 

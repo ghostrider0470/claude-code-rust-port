@@ -2,7 +2,7 @@
 
 ## Active Goal
 
-Rewrite the current repository into a Rust-native harness runtime that learns from Claude Code architecture and produces reusable runtime components for Horizon.
+Build a Rust-native Claude Code-style CLI/runtime that Hamza can use as a primary tool, while keeping the underlying components clean enough to donate useful pieces into Horizon later.
 
 ## Phase 1 - Architecture Capture
 
@@ -77,11 +77,11 @@ Rewrite the current repository into a Rust-native harness runtime that learns fr
 - Prefer enums/structs over arbitrary strings
 - Separate pure logic from filesystem operations
 - Make runtime behavior inspectable through events
-- Keep donor value for Horizon in mind at all times
+- Prioritize primary Claude Code CLI usability first, while preserving donor value for Horizon where it does not fight the product path
 
 ## Immediate Next Slice
 
-1. add example-driven CLI docs regression tests if the visible CLI surface grows beyond the current baseline
-2. expand README/ARCHITECTURE examples if the CLI surface changes
+1. expand README/ARCHITECTURE examples when the visible CLI surface changes beyond the current seeded baseline
+2. keep README-backed CLI example tests updated whenever documented output changes
 3. keep each follow-up slice tied to a GitHub issue and PR
 4. prioritize slices that improve primary Claude Code CLI usability, not just internal donor value
