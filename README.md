@@ -25,20 +25,20 @@ The repository is still early, but the Rust MVP lane is already partially implem
 ├── Cargo.lock
 ├── ARCHITECTURE.md
 ├── PORTING_PLAN.md
-├── crates/
-│   ├── harness-cli/
-│   ├── harness-commands/
-│   ├── harness-core/
-│   ├── harness-runtime/
-│   ├── harness-session/
-│   └── harness-tools/
-└── src/
-    └── reference_data/
+├── archive/
+│   └── reference_data/
+└── crates/
+    ├── harness-cli/
+    ├── harness-commands/
+    ├── harness-core/
+    ├── harness-runtime/
+    ├── harness-session/
+    └── harness-tools/
 ```
 
 ## Reference Data Note
 
-`src/reference_data/` is retained in-tree as archival JSON snapshot material from the architecture study. It is useful for design context and documentation, but it is not part of the active Rust runtime path.
+`archive/reference_data/` is the canonical home for retained JSON snapshot material from the architecture study. It is kept in the repo for design context and documentation, but it is not part of the active Rust runtime path. Moving it out of `src/` keeps the primary Claude Code CLI/runtime surface visually clean while preserving the research artifacts that informed the port.
 
 ## Rust MVP Target
 
@@ -368,4 +368,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI inspection surface
 - [x] CLI usage examples and validation flow
 - [x] cleanup of obsolete Python-first scaffolding
-- [ ] decide long-term archival placement for `src/reference_data/`
+- [x] move retained architecture-study snapshots under `archive/reference_data/`

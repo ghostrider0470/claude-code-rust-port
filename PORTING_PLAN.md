@@ -81,7 +81,7 @@ Rewrite the current repository into a Rust-native harness runtime that learns fr
 
 ## Immediate Next Slice
 
-1. decide whether `src/reference_data/` should remain in-tree or move under a clearer archival path
-2. add example-driven CLI docs regression tests if the visible CLI surface grows beyond the current baseline
-3. expand README/ARCHITECTURE examples if the CLI surface changes
-4. keep each follow-up slice tied to a GitHub issue and PR
+1. add example-driven CLI docs regression tests if the visible CLI surface grows beyond the current baseline
+2. expand README/ARCHITECTURE examples if the CLI surface changes
+3. keep each follow-up slice tied to a GitHub issue and PR
+4. prioritize slices that improve primary Claude Code CLI usability, not just internal donor value

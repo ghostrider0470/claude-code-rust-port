@@ -1,5 +1,7 @@
 __pycache__/
-archive/
+archive/*
+!archive/reference_data/
+!archive/reference_data/**
 
 target/
 .sessions/
