@@ -1,14 +1,23 @@
 use harness_commands::{CommandRegistry, CommandResult};
-use harness_core::{PermissionDenial, RuntimeEvent};
+use harness_core::{
+    CommandName, MatchScore, PermissionDenial, Prompt, RuntimeEvent, SessionId, ToolName,
+};
 use harness_session::{SessionState, SessionStore, TranscriptStore};
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchKind {
+    Command,
+    Tool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RoutedMatch {
-    pub kind: String,
+    pub kind: MatchKind,
     pub name: String,
-    pub score: usize,
+    pub score: MatchScore,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,14 +54,16 @@ impl Default for RuntimeEngine {
 impl RuntimeEngine {
     pub fn summary(&self) -> String {
         format!(
-            "commands={} tools={} denied_prefixes=bash",
+            "commands={} tools={} denied_prefixes={}",
             self.commands.list().len(),
-            self.tools.list().len()
+            self.tools.list().len(),
+            self.permissions.denied_prefixes().join(",")
         )
     }
 
-    pub fn route(&self, prompt: &str) -> Vec<RoutedMatch> {
+    pub fn route(&self, prompt: &Prompt) -> Vec<RoutedMatch> {
         let tokens: Vec<String> = prompt
+            .as_str()
             .split(|c: char| c.is_whitespace() || c == '/' || c == '-')
             .filter(|token| !token.is_empty())
             .map(|token| token.to_ascii_lowercase())
@@ -62,7 +73,7 @@ impl RuntimeEngine {
 
         for command in self.commands.list() {
             let haystacks = [
-                command.name.to_ascii_lowercase(),
+                command.name.0.to_ascii_lowercase(),
                 command.description.to_ascii_lowercase(),
             ];
             let score = tokens
@@ -71,16 +82,16 @@ impl RuntimeEngine {
                 .count();
             if score > 0 {
                 matches.push(RoutedMatch {
-                    kind: "command".into(),
-                    name: command.name.clone(),
-                    score,
+                    kind: MatchKind::Command,
+                    name: command.name.to_string(),
+                    score: MatchScore(score),
                 });
             }
         }
 
         for tool in self.tools.list() {
             let haystacks = [
-                tool.name.to_ascii_lowercase(),
+                tool.name.0.to_ascii_lowercase(),
                 tool.description.to_ascii_lowercase(),
             ];
             let score = tokens
@@ -89,9 +100,9 @@ impl RuntimeEngine {
                 .count();
             if score > 0 {
                 matches.push(RoutedMatch {
-                    kind: "tool".into(),
-                    name: tool.name.clone(),
-                    score,
+                    kind: MatchKind::Tool,
+                    name: tool.name.to_string(),
+                    score: MatchScore(score),
                 });
             }
         }
@@ -99,45 +110,47 @@ impl RuntimeEngine {
         matches.sort_by(|a, b| {
             b.score
                 .cmp(&a.score)
-                .then_with(|| a.kind.cmp(&b.kind))
+                .then_with(|| format!("{:?}", a.kind).cmp(&format!("{:?}", b.kind)))
                 .then_with(|| a.name.cmp(&b.name))
         });
         matches
     }
 
-    pub fn bootstrap(&self, prompt: &str) -> Result<TurnReport, String> {
+    pub fn bootstrap(&self, prompt: Prompt) -> Result<TurnReport, String> {
         let mut session = SessionState::default();
         let mut transcript = TranscriptStore::default();
         let mut events = vec![RuntimeEvent::SessionStarted {
-            session_id: session.session_id.clone(),
+            session_id: SessionId(session.session_id.0),
         }];
         events.push(RuntimeEvent::PromptReceived {
-            prompt: prompt.to_string(),
+            prompt: prompt.clone(),
         });
 
-        let matches = self.route(prompt);
+        let matches = self.route(&prompt);
         events.push(RuntimeEvent::RouteComputed {
             match_count: matches.len(),
         });
 
         for matched in &matches {
-            match matched.kind.as_str() {
-                "command" => events.push(RuntimeEvent::CommandMatched {
-                    name: matched.name.clone(),
+            match matched.kind {
+                MatchKind::Command => events.push(RuntimeEvent::CommandMatched {
+                    name: CommandName::new(matched.name.clone()),
                     score: matched.score,
                 }),
-                "tool" => events.push(RuntimeEvent::ToolMatched {
-                    name: matched.name.clone(),
+                MatchKind::Tool => events.push(RuntimeEvent::ToolMatched {
+                    name: ToolName::new(matched.name.clone()),
                     score: matched.score,
                 }),
-                _ => {}
             }
         }
 
         let denials: Vec<PermissionDenial> = matches
             .iter()
-            .filter(|matched| matched.kind == "tool")
-            .filter_map(|matched| self.permissions.denial_for(&matched.name))
+            .filter(|matched| matched.kind == MatchKind::Tool)
+            .filter_map(|matched| {
+                self.permissions
+                    .denial_for(&ToolName::new(matched.name.clone()))
+            })
             .collect();
 
         for denial in &denials {
@@ -149,14 +162,13 @@ impl RuntimeEngine {
 
         let command_results: Vec<CommandResult> = matches
             .iter()
-            .filter(|matched| matched.kind == "command")
+            .filter(|matched| matched.kind == MatchKind::Command)
             .map(|matched| {
-                events.push(RuntimeEvent::CommandInvoked {
-                    name: matched.name.clone(),
-                });
-                let result = self.commands.execute(&matched.name, prompt);
+                let name = CommandName::new(matched.name.clone());
+                events.push(RuntimeEvent::CommandInvoked { name: name.clone() });
+                let result = self.commands.execute(&name, prompt.as_str());
                 events.push(RuntimeEvent::CommandCompleted {
-                    name: matched.name.clone(),
+                    name,
                     handled: result.handled,
                 });
                 result
@@ -165,23 +177,26 @@ impl RuntimeEngine {
 
         let tool_results: Vec<ToolResult> = matches
             .iter()
-            .filter(|matched| matched.kind == "tool")
-            .filter(|matched| self.permissions.denial_for(&matched.name).is_none())
+            .filter(|matched| matched.kind == MatchKind::Tool)
+            .filter(|matched| {
+                self.permissions
+                    .denial_for(&ToolName::new(matched.name.clone()))
+                    .is_none()
+            })
             .map(|matched| {
-                events.push(RuntimeEvent::ToolInvoked {
-                    name: matched.name.clone(),
-                });
-                let result = self.tools.execute(&matched.name, prompt);
+                let name = ToolName::new(matched.name.clone());
+                events.push(RuntimeEvent::ToolInvoked { name: name.clone() });
+                let result = self.tools.execute(&name, prompt.as_str());
                 events.push(RuntimeEvent::ToolCompleted {
-                    name: matched.name.clone(),
+                    name,
                     handled: result.handled,
                 });
                 result
             })
             .collect();
 
-        session.messages.push(prompt.to_string());
-        session.usage = session.usage.add_turn(prompt, "turn completed");
+        session.messages.push(prompt.clone());
+        session.usage = session.usage.add_turn(prompt.as_str(), "turn completed");
         transcript.append(prompt);
         transcript.flush();
 

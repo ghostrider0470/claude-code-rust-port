@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -16,6 +17,61 @@ impl Default for SessionId {
         Self::new()
     }
 }
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+pub struct TurnIndex(pub usize);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Prompt(pub String);
+
+impl Prompt {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ToolName(pub String);
+
+impl ToolName {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+impl fmt::Display for ToolName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CommandName(pub String);
+
+impl CommandName {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+impl fmt::Display for CommandName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+pub struct MatchScore(pub usize);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct UsageSummary {
@@ -40,18 +96,47 @@ pub struct PermissionDenial {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeEvent {
-    SessionStarted { session_id: SessionId },
-    PromptReceived { prompt: String },
-    RouteComputed { match_count: usize },
-    CommandMatched { name: String, score: usize },
-    ToolMatched { name: String, score: usize },
-    PermissionDenied { subject: String, reason: String },
-    CommandInvoked { name: String },
-    CommandCompleted { name: String, handled: bool },
-    ToolInvoked { name: String },
-    ToolCompleted { name: String, handled: bool },
-    TurnCompleted { stop_reason: String },
-    SessionPersisted { path: String },
+    SessionStarted {
+        session_id: SessionId,
+    },
+    PromptReceived {
+        prompt: Prompt,
+    },
+    RouteComputed {
+        match_count: usize,
+    },
+    CommandMatched {
+        name: CommandName,
+        score: MatchScore,
+    },
+    ToolMatched {
+        name: ToolName,
+        score: MatchScore,
+    },
+    PermissionDenied {
+        subject: String,
+        reason: String,
+    },
+    CommandInvoked {
+        name: CommandName,
+    },
+    CommandCompleted {
+        name: CommandName,
+        handled: bool,
+    },
+    ToolInvoked {
+        name: ToolName,
+    },
+    ToolCompleted {
+        name: ToolName,
+        handled: bool,
+    },
+    TurnCompleted {
+        stop_reason: String,
+    },
+    SessionPersisted {
+        path: String,
+    },
 }
 
 #[derive(Debug, Error)]

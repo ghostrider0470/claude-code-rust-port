@@ -1,14 +1,15 @@
+use harness_core::CommandName;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandDefinition {
-    pub name: String,
+    pub name: CommandName,
     pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandResult {
-    pub name: String,
+    pub name: CommandName,
     pub handled: bool,
     pub message: String,
 }
@@ -23,15 +24,15 @@ impl CommandRegistry {
         Self {
             commands: vec![
                 CommandDefinition {
-                    name: "review".into(),
+                    name: CommandName::new("review"),
                     description: "Review code or diffs".into(),
                 },
                 CommandDefinition {
-                    name: "agents".into(),
+                    name: CommandName::new("agents"),
                     description: "Inspect agent state".into(),
                 },
                 CommandDefinition {
-                    name: "setup".into(),
+                    name: CommandName::new("setup"),
                     description: "Show runtime setup state".into(),
                 },
             ],
@@ -42,23 +43,11 @@ impl CommandRegistry {
         &self.commands
     }
 
-    pub fn find(&self, query: &str) -> Vec<CommandDefinition> {
-        let needle = query.to_ascii_lowercase();
-        self.commands
-            .iter()
-            .filter(|command| {
-                command.name.to_ascii_lowercase().contains(&needle)
-                    || command.description.to_ascii_lowercase().contains(&needle)
-            })
-            .cloned()
-            .collect()
-    }
-
-    pub fn execute(&self, name: &str, prompt: &str) -> CommandResult {
+    pub fn execute(&self, name: &CommandName, prompt: &str) -> CommandResult {
         match self
             .commands
             .iter()
-            .find(|command| command.name.eq_ignore_ascii_case(name))
+            .find(|command| command.name.0.eq_ignore_ascii_case(&name.0))
         {
             Some(command) => CommandResult {
                 name: command.name.clone(),
@@ -69,7 +58,7 @@ impl CommandRegistry {
                 ),
             },
             None => CommandResult {
-                name: name.to_string(),
+                name: name.clone(),
                 handled: false,
                 message: format!("unknown command: {}", name),
             },
