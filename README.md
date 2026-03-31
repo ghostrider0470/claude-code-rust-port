@@ -11,9 +11,9 @@ This repository studies the exposed Claude Code architecture at the systems leve
 The repository already contains:
 
 - a Cargo workspace
-- initial Rust crates for core/session/tools/commands/runtime/cli boundaries
+- Rust crates for core/session/tools/commands/runtime/cli boundaries
 - architecture and implementation planning docs
-- snapshot/reference material used to understand architectural surfaces
+- retained JSON snapshot/reference material used to understand architectural surfaces
 
 The repository is still early, but the Rust MVP lane is already partially implemented and tracked incrementally through the active GitHub issue queue.
 
@@ -32,10 +32,8 @@ The repository is still early, but the Rust MVP lane is already partially implem
 │   ├── harness-runtime/
 │   ├── harness-session/
 │   └── harness-tools/
-├── src/
-│   ├── reference_data/
-│   └── *.py parity/research helpers
-└── tests/
+└── src/
+    └── reference_data/
 ```
 
 ## Rust MVP Target
@@ -129,4 +127,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] registries
 - [x] router/runtime loop
 - [x] CLI inspection surface
-- [ ] cleanup of obsolete Python-first scaffolding
+- [x] cleanup of obsolete Python-first scaffolding
