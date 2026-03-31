@@ -175,11 +175,12 @@ Shared types:
 ### harness-session
 Session and transcript concerns:
 - `SessionState`
+- `SessionListing`
 - `TranscriptEntry`
 - `TranscriptStore`
 - `SessionStore`
 - compaction policy
-- disk persistence/load
+- disk persistence/load/list
 
 ### harness-tools
 Tool concerns:
@@ -215,6 +216,7 @@ User-facing CLI:
 - `bootstrap <prompt>`
 - `tools list`
 - `commands list`
+- `sessions`
 - `session show <id>`
 
 ## Structured Event Model
