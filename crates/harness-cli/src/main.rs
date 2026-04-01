@@ -17,6 +17,7 @@ enum CliCommand {
     Bootstrap { prompt: String },
     Tools,
     Commands,
+    Sessions,
     SessionShow { id: String },
 }
 
@@ -38,6 +39,10 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
         }
         CliCommand::Commands => {
             serde_json::to_string_pretty(engine.commands.list()).expect("serialize command list")
+        }
+        CliCommand::Sessions => {
+            let sessions = engine.list_sessions().expect("list persisted sessions");
+            serde_json::to_string_pretty(&sessions).expect("serialize session list")
         }
         CliCommand::SessionShow { id } => {
             let session = engine.load_session(&id).expect("load session by id");
@@ -172,6 +177,34 @@ mod tests {
         assert_eq!(output, readme_output_block("commands", "json"));
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn sessions_match_readme_example() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let sessions_output = render_command(&engine, CliCommand::Sessions);
+
+        assert_eq!(
+            normalize_bootstrap_example(&sessions_output, &session_id, &root),
+            readme_output_block("sessions", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
 
     #[test]

@@ -49,7 +49,7 @@ The first meaningful milestone is:
 - tool and command registries
 - deterministic routing
 - runtime turn processor with structured events
-- CLI commands for summary, route, bootstrap, tools, commands, and session inspection
+- CLI commands for summary, route, bootstrap, tools, commands, session listing, and session inspection
 
 See:
 
@@ -283,6 +283,22 @@ cargo run -q -p harness-cli -- bootstrap "review bash"
 }
 ```
 
+### `sessions`
+
+```bash
+cargo run -q -p harness-cli -- sessions
+```
+
+```json
+[
+  {
+    "session_id": "<session-id>",
+    "message_count": 1,
+    "persisted_path": ".sessions/<session-id>.json"
+  }
+]
+```
+
 ### `session-show <id>`
 
 ```bash
@@ -313,7 +329,8 @@ Current protected Rust surface:
 - transcript compaction behavior in `harness-session`
 - deterministic route ordering in `harness-runtime`
 - bootstrap permission denial + session persistence behavior in `harness-runtime`
-- README-backed CLI output regression coverage for `summary`, `route <prompt>`, `tools`, and `commands`
+- `harness-session` deterministic persisted-session listing metadata
+- README-backed CLI output regression coverage for `summary`, `route <prompt>`, `tools`, `commands`, and `sessions`
 - README-backed persisted-session example coverage for `bootstrap <prompt>` and `session-show <id>`, with generated session identifiers normalized to `<session-id>` in test assertions
 
 Validation commands:

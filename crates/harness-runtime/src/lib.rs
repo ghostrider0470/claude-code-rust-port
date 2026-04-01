@@ -2,7 +2,7 @@ use harness_commands::{CommandRegistry, CommandResult};
 use harness_core::{
     CommandName, MatchScore, PermissionDenial, Prompt, RuntimeEvent, SessionId, ToolName,
 };
-use harness_session::{SessionState, SessionStore, TranscriptStore};
+use harness_session::{SessionListing, SessionState, SessionStore, TranscriptStore};
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
 
@@ -219,6 +219,10 @@ impl RuntimeEngine {
             events,
             persisted_path: persisted_path.display().to_string(),
         })
+    }
+
+    pub fn list_sessions(&self) -> Result<Vec<SessionListing>, String> {
+        self.store.list().map_err(|err| err.to_string())
     }
 
     pub fn load_session(&self, id: &str) -> Result<SessionState, String> {
