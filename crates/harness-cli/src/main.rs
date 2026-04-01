@@ -113,14 +113,35 @@ mod tests {
             .to_string()
     }
 
+    fn normalize_created_at_ms(output: &str) -> String {
+        let marker = "\"created_at_ms\": ";
+        if let Some(start) = output.find(marker) {
+            let value_start = start + marker.len();
+            let value_end = output[value_start..]
+                .find(|ch: char| !ch.is_ascii_digit())
+                .map(|offset| value_start + offset)
+                .unwrap_or(output.len());
+
+            let mut normalized = String::with_capacity(output.len());
+            normalized.push_str(&output[..value_start]);
+            normalized.push_str("<created-at-ms>");
+            normalized.push_str(&output[value_end..]);
+            normalized
+        } else {
+            output.to_string()
+        }
+    }
+
     fn normalize_bootstrap_example(output: &str, session_id: &str, root: &PathBuf) -> String {
-        output
-            .replace(session_id, "<session-id>")
-            .replace(root.to_string_lossy().as_ref(), ".sessions")
+        normalize_created_at_ms(
+            &output
+                .replace(session_id, "<session-id>")
+                .replace(root.to_string_lossy().as_ref(), ".sessions"),
+        )
     }
 
     fn normalize_session_output(output: &str, session_id: &str) -> String {
-        output.replace(session_id, "<session-id>")
+        normalize_created_at_ms(&output.replace(session_id, "<session-id>"))
     }
 
     #[test]
@@ -243,6 +264,39 @@ mod tests {
         assert_eq!(
             normalize_session_output(&session_output, &session_id),
             readme_output_block("session-show <id>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_latest_matches_readme_example() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let latest_output = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                id: "latest".to_string(),
+            },
+        );
+
+        assert_eq!(
+            normalize_session_output(&latest_output, &session_id),
+            readme_output_block("session-show latest", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");

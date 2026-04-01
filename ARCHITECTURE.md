@@ -179,8 +179,9 @@ Session and transcript concerns:
 - `TranscriptEntry`
 - `TranscriptStore`
 - `SessionStore`
+- recency metadata for persisted sessions
 - compaction policy
-- disk persistence/load/list
+- disk persistence/load/list/latest
 
 ### harness-tools
 Tool concerns:
@@ -216,8 +217,9 @@ User-facing CLI:
 - `bootstrap <prompt>`
 - `tools list`
 - `commands list`
-- `sessions`
+- `sessions` (newest-first)
 - `session show <id>`
+- `session show latest`
 
 ## Structured Event Model
 
