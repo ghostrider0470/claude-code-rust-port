@@ -91,7 +91,7 @@ cargo run -p harness-cli -- --help
 
 ## CLI Usage Examples
 
-The examples below reflect the current seeded runtime surface and are protected by `cargo test -p harness-cli`. `bootstrap` creates a session file under `.sessions/`, which is gitignored, so the README uses the stable placeholder `<session-id>` (and matching persisted path) for the generated values that vary per run.
+The examples below reflect the current seeded runtime surface and are protected by `cargo test -p harness-cli`. `bootstrap` creates a session file under `.sessions/`, which is gitignored, so the README uses stable placeholders for generated values that vary per run: `<session-id>` for ids, `<created-at-ms>` for persisted recency metadata, and matching `.sessions/<session-id>.json` paths.
 
 ### `summary`
 
@@ -180,6 +180,7 @@ cargo run -q -p harness-cli -- bootstrap "review bash"
 {
   "session": {
     "session_id": "<session-id>",
+    "created_at_ms": <created-at-ms>,
     "messages": [
       "review bash"
     ],
@@ -293,6 +294,7 @@ cargo run -q -p harness-cli -- sessions
 [
   {
     "session_id": "<session-id>",
+    "created_at_ms": <created-at-ms>,
     "message_count": 1,
     "persisted_path": ".sessions/<session-id>.json"
   }
@@ -308,6 +310,27 @@ cargo run -q -p harness-cli -- session-show <session-id>
 ```json
 {
   "session_id": "<session-id>",
+  "created_at_ms": <created-at-ms>,
+  "messages": [
+    "review bash"
+  ],
+  "usage": {
+    "input_tokens": 2,
+    "output_tokens": 2
+  }
+}
+```
+
+### `session-show latest`
+
+```bash
+cargo run -q -p harness-cli -- session-show latest
+```
+
+```json
+{
+  "session_id": "<session-id>",
+  "created_at_ms": <created-at-ms>,
   "messages": [
     "review bash"
   ],
@@ -329,9 +352,9 @@ Current protected Rust surface:
 - transcript compaction behavior in `harness-session`
 - deterministic route ordering in `harness-runtime`
 - bootstrap permission denial + session persistence behavior in `harness-runtime`
-- `harness-session` deterministic persisted-session listing metadata
+- `harness-session` recency metadata, newest-first listing, and latest-session lookup
 - README-backed CLI output regression coverage for `summary`, `route <prompt>`, `tools`, `commands`, and `sessions`
-- README-backed persisted-session example coverage for `bootstrap <prompt>` and `session-show <id>`, with generated session identifiers normalized to `<session-id>` in test assertions
+- README-backed persisted-session example coverage for `bootstrap <prompt>`, `session-show <id>`, and `session-show latest`, with generated session identifiers normalized to `<session-id>` and generated recency metadata normalized to `<created-at-ms>` in test assertions
 
 Validation commands:
 

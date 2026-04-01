@@ -226,6 +226,10 @@ impl RuntimeEngine {
     }
 
     pub fn load_session(&self, id: &str) -> Result<SessionState, String> {
+        if id == "latest" {
+            return self.store.latest().map_err(|err| err.to_string());
+        }
+
         self.store.load(id).map_err(|err| err.to_string())
     }
 }

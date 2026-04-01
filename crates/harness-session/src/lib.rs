@@ -1,8 +1,16 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use harness_core::{Prompt, RuntimeError, SessionId, TurnIndex, UsageSummary};
 use serde::{Deserialize, Serialize};
+
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_millis() as u64
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptEntry {
@@ -45,6 +53,8 @@ impl TranscriptStore {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
     pub session_id: SessionId,
+    #[serde(default = "current_timestamp_ms")]
+    pub created_at_ms: u64,
     pub messages: Vec<Prompt>,
     pub usage: UsageSummary,
 }
@@ -53,6 +63,7 @@ impl Default for SessionState {
     fn default() -> Self {
         Self {
             session_id: SessionId::new(),
+            created_at_ms: current_timestamp_ms(),
             messages: Vec::new(),
             usage: UsageSummary::default(),
         }
@@ -62,6 +73,7 @@ impl Default for SessionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListing {
     pub session_id: SessionId,
+    pub created_at_ms: u64,
     pub message_count: usize,
     pub persisted_path: String,
 }
@@ -98,6 +110,15 @@ impl SessionStore {
         serde_json::from_str(&body).map_err(|err| RuntimeError::Serialization(err.to_string()))
     }
 
+    pub fn latest(&self) -> Result<SessionState, RuntimeError> {
+        let latest = self
+            .list()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| RuntimeError::SessionNotFound("latest".to_string()))?;
+        self.load(&latest.session_id.to_string())
+    }
+
     pub fn list(&self) -> Result<Vec<SessionListing>, RuntimeError> {
         if !self.root.exists() {
             return Ok(Vec::new());
@@ -122,15 +143,17 @@ impl SessionStore {
 
             sessions.push(SessionListing {
                 session_id: session.session_id,
+                created_at_ms: session.created_at_ms,
                 message_count: session.messages.len(),
                 persisted_path: path.display().to_string(),
             });
         }
 
         sessions.sort_by(|left, right| {
-            left.session_id
-                .to_string()
-                .cmp(&right.session_id.to_string())
+            right
+                .created_at_ms
+                .cmp(&left.created_at_ms)
+                .then_with(|| left.session_id.to_string().cmp(&right.session_id.to_string()))
                 .then_with(|| left.persisted_path.cmp(&right.persisted_path))
         });
 
@@ -160,6 +183,7 @@ mod tests {
         let store = SessionStore::new(&root);
         let session = SessionState {
             session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
             messages: vec![Prompt::new("review the runtime lane")],
             usage: harness_core::UsageSummary {
                 input_tokens: 4,
@@ -198,19 +222,21 @@ mod tests {
     }
 
     #[test]
-    fn lists_persisted_sessions_deterministically() {
+    fn lists_persisted_sessions_newest_first() {
         let root = temp_session_root();
         let store = SessionStore::new(&root);
-        let first = SessionState {
+        let older = SessionState {
             session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_000,
             messages: vec![Prompt::new("review bash")],
             usage: harness_core::UsageSummary {
                 input_tokens: 2,
                 output_tokens: 2,
             },
         };
-        let second = SessionState {
+        let newer = SessionState {
             session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_100,
             messages: vec![Prompt::new("summary"), Prompt::new("tools")],
             usage: harness_core::UsageSummary {
                 input_tokens: 2,
@@ -218,8 +244,8 @@ mod tests {
             },
         };
 
-        store.save(&first).expect("save first session");
-        store.save(&second).expect("save second session");
+        store.save(&older).expect("save older session");
+        store.save(&newer).expect("save newer session");
         fs::write(root.join("notes.txt"), "ignore me").expect("write non-session fixture");
 
         let listed = store.list().expect("list persisted sessions");
@@ -227,35 +253,75 @@ mod tests {
             .iter()
             .map(|session| session.session_id.to_string())
             .collect();
-        let mut expected_ids = vec![first.session_id.to_string(), second.session_id.to_string()];
-        expected_ids.sort();
 
-        assert_eq!(listed_ids, expected_ids);
+        assert_eq!(
+            listed_ids,
+            vec![newer.session_id.to_string(), older.session_id.to_string()]
+        );
 
-        let by_id: BTreeMap<String, (usize, String)> = listed
+        let by_id: BTreeMap<String, (u64, usize, String)> = listed
             .into_iter()
             .map(|session| {
                 (
                     session.session_id.to_string(),
-                    (session.message_count, session.persisted_path),
+                    (
+                        session.created_at_ms,
+                        session.message_count,
+                        session.persisted_path,
+                    ),
                 )
             })
             .collect();
 
-        assert_eq!(by_id[&first.session_id.to_string()].0, 1);
-        assert_eq!(by_id[&second.session_id.to_string()].0, 2);
+        assert_eq!(by_id[&older.session_id.to_string()].0, older.created_at_ms);
+        assert_eq!(by_id[&newer.session_id.to_string()].0, newer.created_at_ms);
+        assert_eq!(by_id[&older.session_id.to_string()].1, 1);
+        assert_eq!(by_id[&newer.session_id.to_string()].1, 2);
         assert_eq!(
-            by_id[&first.session_id.to_string()].1,
-            root.join(format!("{}.json", first.session_id))
+            by_id[&older.session_id.to_string()].2,
+            root.join(format!("{}.json", older.session_id))
                 .display()
                 .to_string()
         );
         assert_eq!(
-            by_id[&second.session_id.to_string()].1,
-            root.join(format!("{}.json", second.session_id))
+            by_id[&newer.session_id.to_string()].2,
+            root.join(format!("{}.json", newer.session_id))
                 .display()
                 .to_string()
         );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn loads_latest_persisted_session() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+        let older = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_000,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+        };
+        let newer = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_100,
+            messages: vec![Prompt::new("summary")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+
+        store.save(&older).expect("save older session");
+        store.save(&newer).expect("save newer session");
+
+        let latest = store.latest().expect("load latest session");
+
+        assert_eq!(latest, newer);
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
     }
