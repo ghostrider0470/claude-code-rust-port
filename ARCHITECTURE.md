@@ -178,10 +178,12 @@ Session and transcript concerns:
 - `SessionListing`
 - `TranscriptEntry`
 - `TranscriptStore`
+- `TranscriptRecord` (on-disk transcript format: `session_id`, `created_at_ms`, `updated_at_ms`, ordered `entries`)
 - `SessionStore`
 - recency metadata for persisted sessions (`created_at_ms`) plus activity metadata (`updated_at_ms`) that bumps on resume so `latest` follows the most recently active session
 - compaction policy
 - disk persistence/load/list/latest/resume-aware ordering
+- sibling transcript file per session at `<session-id>.transcript.json`, rewritten on bootstrap and resume; transcript files are excluded from session listings so session and transcript inspection stay independent
 
 ### harness-tools
 Tool concerns:
@@ -221,6 +223,7 @@ User-facing CLI:
 - `sessions` (newest-first)
 - `session show <id>`
 - `session show latest`
+- `transcript show <id>` and `transcript show latest` (machine-readable JSON transcript inspection that restates the owning session id and preserves turn ordering)
 
 ## Structured Event Model
 
@@ -239,6 +242,7 @@ The Rust runtime should expose a typed event stream. First event set:
 - `ToolCompleted`
 - `TurnCompleted`
 - `SessionPersisted`
+- `TranscriptPersisted`
 
 These should be serializable with `serde`.
 
