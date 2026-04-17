@@ -3,7 +3,7 @@ use harness_core::{
     CommandName, MatchScore, PermissionDenial, Prompt, RuntimeEvent, SessionId, ToolName, TurnIndex,
 };
 use harness_session::{
-    SessionListing, SessionState, SessionStore, TranscriptRecord, TranscriptStore,
+    SessionExport, SessionListing, SessionState, SessionStore, TranscriptRecord, TranscriptStore,
 };
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
@@ -394,6 +394,15 @@ impl RuntimeEngine {
 
         self.store.load_transcript(id).map_err(|err| err.to_string())
     }
+
+    pub fn export_session(&self, id: &str) -> Result<SessionExport, String> {
+        let session = self.load_session(id)?;
+        let transcript = self
+            .store
+            .load_transcript(&session.session_id.to_string())
+            .map_err(|err| err.to_string())?;
+        Ok(SessionExport::new(session, transcript))
+    }
 }
 
 #[cfg(test)]
@@ -599,6 +608,52 @@ mod tests {
             .expect("load latest transcript");
         assert_eq!(latest.session_id.to_string(), id);
         assert_eq!(latest.entries.len(), 2);
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn export_session_bundles_persisted_state_and_transcript_for_id_and_latest() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let bootstrap = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap session");
+        let id = bootstrap.session.session_id.to_string();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let resumed = engine
+            .resume(&id, Prompt::new("summary please"))
+            .expect("resume session");
+
+        let export = engine.export_session(&id).expect("export by id");
+        assert_eq!(export.exported_session_id.to_string(), id);
+        assert_eq!(export.session, resumed.session);
+        assert_eq!(export.transcript.session_id.to_string(), id);
+        let ordered: Vec<(usize, String)> = export
+            .transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "summary please".to_string()),
+            ]
+        );
+
+        let latest_export = engine.export_session("latest").expect("export latest");
+        assert_eq!(latest_export, export, "`latest` must resolve to the same bundle");
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }
