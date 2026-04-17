@@ -81,6 +81,25 @@ impl SessionState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptRecord {
+    pub session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub entries: Vec<TranscriptEntry>,
+}
+
+impl TranscriptRecord {
+    pub fn from_session(session: &SessionState, transcript: &TranscriptStore) -> Self {
+        Self {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: transcript.entries.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListing {
     pub session_id: SessionId,
     pub created_at_ms: u64,
@@ -112,8 +131,29 @@ impl SessionStore {
         Ok(path)
     }
 
+    pub fn save_transcript(
+        &self,
+        record: &TranscriptRecord,
+    ) -> Result<PathBuf, RuntimeError> {
+        fs::create_dir_all(&self.root).map_err(|err| RuntimeError::Io(err.to_string()))?;
+        let path = self.transcript_path(&record.session_id.to_string());
+        let body = serde_json::to_string_pretty(record)
+            .map_err(|err| RuntimeError::Serialization(err.to_string()))?;
+        fs::write(&path, body).map_err(|err| RuntimeError::Io(err.to_string()))?;
+        Ok(path)
+    }
+
     pub fn load(&self, session_id: &str) -> Result<SessionState, RuntimeError> {
         let path = self.root.join(format!("{}.json", session_id));
+        if !path.exists() {
+            return Err(RuntimeError::SessionNotFound(session_id.to_string()));
+        }
+        let body = fs::read_to_string(&path).map_err(|err| RuntimeError::Io(err.to_string()))?;
+        serde_json::from_str(&body).map_err(|err| RuntimeError::Serialization(err.to_string()))
+    }
+
+    pub fn load_transcript(&self, session_id: &str) -> Result<TranscriptRecord, RuntimeError> {
+        let path = self.transcript_path(session_id);
         if !path.exists() {
             return Err(RuntimeError::SessionNotFound(session_id.to_string()));
         }
@@ -128,6 +168,19 @@ impl SessionStore {
             .next()
             .ok_or_else(|| RuntimeError::SessionNotFound("latest".to_string()))?;
         self.load(&latest.session_id.to_string())
+    }
+
+    pub fn latest_transcript(&self) -> Result<TranscriptRecord, RuntimeError> {
+        let latest = self
+            .list()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| RuntimeError::SessionNotFound("latest".to_string()))?;
+        self.load_transcript(&latest.session_id.to_string())
+    }
+
+    pub fn transcript_path(&self, session_id: &str) -> PathBuf {
+        self.root.join(format!("{session_id}.transcript.json"))
     }
 
     pub fn list(&self) -> Result<Vec<SessionListing>, RuntimeError> {
@@ -145,6 +198,13 @@ impl SessionStore {
                 continue;
             }
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.ends_with(".transcript.json"))
+            {
                 continue;
             }
 
@@ -176,7 +236,7 @@ impl SessionStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionState, SessionStore, TranscriptStore};
+    use super::{SessionState, SessionStore, TranscriptRecord, TranscriptStore};
     use harness_core::{Prompt, SessionId};
     use std::collections::BTreeMap;
     use std::fs;
@@ -340,6 +400,111 @@ mod tests {
         let latest = store.latest().expect("load latest session");
 
         assert_eq!(latest, newer);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn saves_and_loads_transcript_record_round_trip_preserving_order() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash"), Prompt::new("summary please")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 4,
+                output_tokens: 4,
+            },
+        };
+
+        let mut transcript = TranscriptStore::default();
+        transcript.append(Prompt::new("review bash"));
+        transcript.append(Prompt::new("summary please"));
+
+        let record = TranscriptRecord::from_session(&session, &transcript);
+        let saved_path = store.save_transcript(&record).expect("save transcript");
+        assert_eq!(
+            saved_path,
+            root.join(format!("{}.transcript.json", session.session_id))
+        );
+
+        let loaded = store
+            .load_transcript(&session.session_id.to_string())
+            .expect("load transcript");
+
+        assert_eq!(loaded.session_id, session.session_id);
+        assert_eq!(loaded.created_at_ms, session.created_at_ms);
+        assert_eq!(loaded.updated_at_ms, session.updated_at_ms);
+        let ordered: Vec<(usize, String)> = loaded
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "summary please".to_string()),
+            ]
+        );
+
+        store.save(&session).expect("save session state");
+        let listed_ids: Vec<String> = store
+            .list()
+            .expect("list persisted sessions")
+            .into_iter()
+            .map(|listing| listing.session_id.to_string())
+            .collect();
+        assert_eq!(listed_ids, vec![session.session_id.to_string()]);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn latest_transcript_follows_most_recently_updated_session() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+        let older = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_000,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+        };
+        let newer = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_100,
+            updated_at_ms: 1_700_000_000_100,
+            messages: vec![Prompt::new("summary")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+
+        let mut older_transcript = TranscriptStore::default();
+        older_transcript.append(Prompt::new("review bash"));
+        let mut newer_transcript = TranscriptStore::default();
+        newer_transcript.append(Prompt::new("summary"));
+
+        store.save(&older).expect("save older session");
+        store.save(&newer).expect("save newer session");
+        store
+            .save_transcript(&TranscriptRecord::from_session(&older, &older_transcript))
+            .expect("save older transcript");
+        store
+            .save_transcript(&TranscriptRecord::from_session(&newer, &newer_transcript))
+            .expect("save newer transcript");
+
+        let latest = store.latest_transcript().expect("load latest transcript");
+        assert_eq!(latest.session_id, newer.session_id);
+        assert_eq!(latest.entries.len(), 1);
+        assert_eq!(latest.entries[0].prompt.0, "summary");
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
     }

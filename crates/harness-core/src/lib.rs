@@ -141,6 +141,9 @@ pub enum RuntimeEvent {
     SessionPersisted {
         path: String,
     },
+    TranscriptPersisted {
+        path: String,
+    },
 }
 
 #[derive(Debug, Error)]

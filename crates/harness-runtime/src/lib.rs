@@ -2,7 +2,9 @@ use harness_commands::{CommandRegistry, CommandResult};
 use harness_core::{
     CommandName, MatchScore, PermissionDenial, Prompt, RuntimeEvent, SessionId, ToolName, TurnIndex,
 };
-use harness_session::{SessionListing, SessionState, SessionStore, TranscriptStore};
+use harness_session::{
+    SessionListing, SessionState, SessionStore, TranscriptRecord, TranscriptStore,
+};
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
 
@@ -30,6 +32,7 @@ pub struct TurnReport {
     pub tool_results: Vec<ToolResult>,
     pub events: Vec<RuntimeEvent>,
     pub persisted_path: String,
+    pub persisted_transcript_path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +47,7 @@ pub struct ResumeReport {
     pub tool_results: Vec<ToolResult>,
     pub events: Vec<RuntimeEvent>,
     pub persisted_path: String,
+    pub persisted_transcript_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +227,15 @@ impl RuntimeEngine {
             path: persisted_path.display().to_string(),
         });
 
+        let transcript_record = TranscriptRecord::from_session(&session, &transcript);
+        let persisted_transcript_path = self
+            .store
+            .save_transcript(&transcript_record)
+            .map_err(|err| err.to_string())?;
+        events.push(RuntimeEvent::TranscriptPersisted {
+            path: persisted_transcript_path.display().to_string(),
+        });
+
         Ok(TurnReport {
             session,
             transcript,
@@ -232,6 +245,7 @@ impl RuntimeEngine {
             tool_results,
             events,
             persisted_path: persisted_path.display().to_string(),
+            persisted_transcript_path: persisted_transcript_path.display().to_string(),
         })
     }
 
@@ -337,6 +351,15 @@ impl RuntimeEngine {
             path: persisted_path.display().to_string(),
         });
 
+        let transcript_record = TranscriptRecord::from_session(&session, &transcript);
+        let persisted_transcript_path = self
+            .store
+            .save_transcript(&transcript_record)
+            .map_err(|err| err.to_string())?;
+        events.push(RuntimeEvent::TranscriptPersisted {
+            path: persisted_transcript_path.display().to_string(),
+        });
+
         Ok(ResumeReport {
             resumed_session_id,
             appended_turn_index,
@@ -348,6 +371,7 @@ impl RuntimeEngine {
             tool_results,
             events,
             persisted_path: persisted_path.display().to_string(),
+            persisted_transcript_path: persisted_transcript_path.display().to_string(),
         })
     }
 
@@ -361,6 +385,14 @@ impl RuntimeEngine {
         }
 
         self.store.load(id).map_err(|err| err.to_string())
+    }
+
+    pub fn load_transcript(&self, id: &str) -> Result<TranscriptRecord, String> {
+        if id == "latest" {
+            return self.store.latest_transcript().map_err(|err| err.to_string());
+        }
+
+        self.store.load_transcript(id).map_err(|err| err.to_string())
     }
 }
 
@@ -498,6 +530,75 @@ mod tests {
             resumed.resumed_session_id,
             "latest should point at most recently updated session"
         );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn bootstrap_persists_transcript_and_resume_extends_it_in_order() {
+        use harness_core::{Prompt, RuntimeEvent};
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let bootstrap = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap session");
+        let id = bootstrap.session.session_id.to_string();
+
+        assert!(bootstrap
+            .persisted_transcript_path
+            .ends_with(&format!("{id}.transcript.json")));
+        assert!(bootstrap.events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::TranscriptPersisted { path }
+                if path == &bootstrap.persisted_transcript_path
+        )));
+
+        let loaded = engine
+            .load_transcript(&id)
+            .expect("load transcript by id");
+        assert_eq!(loaded.session_id.to_string(), id);
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].prompt.0, "review bash");
+        assert_eq!(loaded.entries[0].turn_index.0, 0);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let resumed = engine
+            .resume(&id, Prompt::new("summary please"))
+            .expect("resume session");
+        assert!(resumed
+            .persisted_transcript_path
+            .ends_with(&format!("{id}.transcript.json")));
+
+        let after_resume = engine
+            .load_transcript(&id)
+            .expect("reload transcript after resume");
+        let ordered: Vec<(usize, String)> = after_resume
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "summary please".to_string()),
+            ]
+        );
+        assert_eq!(after_resume.session_id.to_string(), id);
+        assert_eq!(after_resume.updated_at_ms, resumed.session.updated_at_ms);
+
+        let latest = engine
+            .load_transcript("latest")
+            .expect("load latest transcript");
+        assert_eq!(latest.session_id.to_string(), id);
+        assert_eq!(latest.entries.len(), 2);
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }

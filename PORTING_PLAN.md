@@ -64,6 +64,7 @@ Build a Rust-native Claude Code-style CLI/runtime that Hamza can use as a primar
 - [x] `tools`
 - [x] `commands`
 - [x] `session-show <id>`
+- [x] `transcript-show <id>` (and `transcript-show latest`) — inspect the persisted transcript for an explicit session id or the most recently active session; output is machine-readable JSON that restates the owning `session_id`, the session's recency metadata, and the turn entries in `turn_index` order
 
 ## Phase 8 - Cleanup
 

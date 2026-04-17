@@ -91,7 +91,9 @@ cargo run -p harness-cli -- --help
 
 ## CLI Usage Examples
 
-The examples below reflect the current seeded runtime surface and are protected by `cargo test -p harness-cli`. `bootstrap` creates a session file under `.sessions/`, which is gitignored, so the README uses stable placeholders for generated values that vary per run: `<session-id>` for ids, `<created-at-ms>` and `<updated-at-ms>` for persisted recency/activity metadata, and matching `.sessions/<session-id>.json` paths.
+The examples below reflect the current seeded runtime surface and are protected by `cargo test -p harness-cli`. `bootstrap` creates a session file under `.sessions/`, which is gitignored, so the README uses stable placeholders for generated values that vary per run: `<session-id>` for ids, `<created-at-ms>` and `<updated-at-ms>` for persisted recency/activity metadata, and matching `.sessions/<session-id>.json` session paths plus `.sessions/<session-id>.transcript.json` transcript paths.
+
+Each persisted session now ships a sibling transcript file at `.sessions/<session-id>.transcript.json` in a deterministic format: `{ session_id, created_at_ms, updated_at_ms, entries: [{ turn_index, prompt }] }`. Entries are appended in `turn_index` order, rewritten on every bootstrap and resume, and inspectable through `transcript-show <id>` and `transcript-show latest`.
 
 ### `summary`
 
@@ -279,9 +281,15 @@ cargo run -q -p harness-cli -- bootstrap "review bash"
       "SessionPersisted": {
         "path": ".sessions/<session-id>.json"
       }
+    },
+    {
+      "TranscriptPersisted": {
+        "path": ".sessions/<session-id>.transcript.json"
+      }
     }
   ],
-  "persisted_path": ".sessions/<session-id>.json"
+  "persisted_path": ".sessions/<session-id>.json",
+  "persisted_transcript_path": ".sessions/<session-id>.transcript.json"
 }
 ```
 
@@ -382,9 +390,15 @@ cargo run -q -p harness-cli -- resume <session-id> "review summary"
       "SessionPersisted": {
         "path": ".sessions/<session-id>.json"
       }
+    },
+    {
+      "TranscriptPersisted": {
+        "path": ".sessions/<session-id>.transcript.json"
+      }
     }
   ],
-  "persisted_path": ".sessions/<session-id>.json"
+  "persisted_path": ".sessions/<session-id>.json",
+  "persisted_transcript_path": ".sessions/<session-id>.transcript.json"
 }
 ```
 
@@ -454,6 +468,50 @@ cargo run -q -p harness-cli -- session-show latest
 }
 ```
 
+### `transcript-show <id>`
+
+Inspect the persisted transcript for a specific session. The output restates the owning `session_id` and the session's recency metadata so it is self-describing, and lists turns in append order.
+
+```bash
+cargo run -q -p harness-cli -- transcript-show <session-id>
+```
+
+```json
+{
+  "session_id": "<session-id>",
+  "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
+  "entries": [
+    {
+      "turn_index": 0,
+      "prompt": "review bash"
+    }
+  ]
+}
+```
+
+### `transcript-show latest`
+
+`latest` resolves to the transcript of the most recently active persisted session, mirroring how `session-show latest` resolves session state.
+
+```bash
+cargo run -q -p harness-cli -- transcript-show latest
+```
+
+```json
+{
+  "session_id": "<session-id>",
+  "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
+  "entries": [
+    {
+      "turn_index": 0,
+      "prompt": "review bash"
+    }
+  ]
+}
+```
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -470,6 +528,9 @@ Current protected Rust surface:
 - README-backed persisted-session example coverage for `bootstrap <prompt>`, `session-show <id>`, and `session-show latest`, with generated session identifiers normalized to `<session-id>` and generated recency metadata normalized to `<created-at-ms>` / `<updated-at-ms>` in test assertions
 - `harness-runtime` session resume behavior: an appended turn targets the original session id, bumps `updated_at_ms`, and emits a `SessionResumed` event; `resume latest` targets the most recently active session
 - README-backed CLI coverage for `resume <id> "review summary"` confirming the resumed turn is appended to the existing persisted session and the output exposes the targeted session id plus the appended turn index
+- `harness-session` transcript persistence: save/load round-trip preserves `turn_index` ordering, transcript files are excluded from session listings, and `latest_transcript` follows the most recently updated session
+- `harness-runtime` transcript persistence: `bootstrap` writes a transcript file alongside the session, emits a `TranscriptPersisted` event, and `resume` rewrites the transcript so `turn_index` ordering is extended in place
+- README-backed CLI coverage for `transcript-show <id>` and `transcript-show latest` confirming the output restates the owning `session_id` and preserves turn ordering
 
 Validation commands:
 
@@ -525,3 +586,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] cleanup of obsolete Python-first scaffolding
 - [x] move retained architecture-study snapshots under `archive/reference_data/`
 - [x] CLI session resume for persisted sessions (explicit id and `latest`)
+- [x] Persisted transcript files per session and CLI transcript inspection (`transcript-show <id>` and `transcript-show latest`)

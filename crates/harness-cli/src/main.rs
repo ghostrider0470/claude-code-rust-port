@@ -20,6 +20,7 @@ enum CliCommand {
     Commands,
     Sessions,
     SessionShow { id: String },
+    TranscriptShow { id: String },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -55,6 +56,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             let session = engine.load_session(&id).expect("load session by id");
             serde_json::to_string_pretty(&session).expect("serialize session")
         }
+        CliCommand::TranscriptShow { id } => {
+            let transcript = engine
+                .load_transcript(&id)
+                .expect("load transcript by id");
+            serde_json::to_string_pretty(&transcript).expect("serialize transcript")
+        }
     }
 }
 
@@ -70,7 +77,7 @@ mod tests {
     use super::{render_command, CliCommand};
     use harness_commands::CommandRegistry;
     use harness_runtime::RuntimeEngine;
-    use harness_session::{SessionState, SessionStore};
+    use harness_session::{SessionState, SessionStore, TranscriptRecord};
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -342,6 +349,94 @@ mod tests {
             reloaded_messages,
             vec!["review bash".to_string(), "review summary".to_string()],
             "resume must append to the existing persisted session"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_show_matches_readme_example_and_confirms_session_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let transcript_output = render_command(
+            &engine,
+            CliCommand::TranscriptShow {
+                id: session_id.clone(),
+            },
+        );
+
+        let transcript: TranscriptRecord =
+            serde_json::from_str(&transcript_output).expect("parse transcript-show output");
+        assert_eq!(
+            transcript.session_id.to_string(),
+            session_id,
+            "transcript output must confirm the targeted session id"
+        );
+        let ordered: Vec<(usize, String)> = transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![(0, "review bash".to_string())],
+            "transcript output must preserve turn ordering"
+        );
+
+        assert_eq!(
+            normalize_session_output(&transcript_output, &session_id),
+            readme_output_block("transcript-show <id>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_show_latest_matches_readme_example() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let latest_output = render_command(
+            &engine,
+            CliCommand::TranscriptShow {
+                id: "latest".to_string(),
+            },
+        );
+
+        let latest: TranscriptRecord =
+            serde_json::from_str(&latest_output).expect("parse transcript-show latest output");
+        assert_eq!(latest.session_id.to_string(), session_id);
+
+        assert_eq!(
+            normalize_session_output(&latest_output, &session_id),
+            readme_output_block("transcript-show latest", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
