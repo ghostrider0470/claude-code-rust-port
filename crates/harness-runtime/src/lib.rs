@@ -1,6 +1,6 @@
 use harness_commands::{CommandRegistry, CommandResult};
 use harness_core::{
-    CommandName, MatchScore, PermissionDenial, Prompt, RuntimeEvent, SessionId, ToolName,
+    CommandName, MatchScore, PermissionDenial, Prompt, RuntimeEvent, SessionId, ToolName, TurnIndex,
 };
 use harness_session::{SessionListing, SessionState, SessionStore, TranscriptStore};
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
@@ -22,6 +22,20 @@ pub struct RoutedMatch {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TurnReport {
+    pub session: SessionState,
+    pub transcript: TranscriptStore,
+    pub matches: Vec<RoutedMatch>,
+    pub denials: Vec<PermissionDenial>,
+    pub command_results: Vec<CommandResult>,
+    pub tool_results: Vec<ToolResult>,
+    pub events: Vec<RuntimeEvent>,
+    pub persisted_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResumeReport {
+    pub resumed_session_id: SessionId,
+    pub appended_turn_index: TurnIndex,
     pub session: SessionState,
     pub transcript: TranscriptStore,
     pub matches: Vec<RoutedMatch>,
@@ -221,6 +235,122 @@ impl RuntimeEngine {
         })
     }
 
+    pub fn resume(&self, target: &str, prompt: Prompt) -> Result<ResumeReport, String> {
+        let mut session = self.load_session(target)?;
+        let resumed_session_id = session.session_id.clone();
+
+        let mut transcript = TranscriptStore::default();
+        for existing in &session.messages {
+            transcript.append(existing.clone());
+        }
+
+        let appended_turn_index = TurnIndex(session.messages.len());
+        let mut events = vec![RuntimeEvent::SessionResumed {
+            session_id: resumed_session_id.clone(),
+            turn_index: appended_turn_index,
+        }];
+        events.push(RuntimeEvent::PromptReceived {
+            prompt: prompt.clone(),
+        });
+
+        let matches = self.route(&prompt);
+        events.push(RuntimeEvent::RouteComputed {
+            match_count: matches.len(),
+        });
+
+        for matched in &matches {
+            match matched.kind {
+                MatchKind::Command => events.push(RuntimeEvent::CommandMatched {
+                    name: CommandName::new(matched.name.clone()),
+                    score: matched.score,
+                }),
+                MatchKind::Tool => events.push(RuntimeEvent::ToolMatched {
+                    name: ToolName::new(matched.name.clone()),
+                    score: matched.score,
+                }),
+            }
+        }
+
+        let denials: Vec<PermissionDenial> = matches
+            .iter()
+            .filter(|matched| matched.kind == MatchKind::Tool)
+            .filter_map(|matched| {
+                self.permissions
+                    .denial_for(&ToolName::new(matched.name.clone()))
+            })
+            .collect();
+
+        for denial in &denials {
+            events.push(RuntimeEvent::PermissionDenied {
+                subject: denial.subject.clone(),
+                reason: denial.reason.clone(),
+            });
+        }
+
+        let command_results: Vec<CommandResult> = matches
+            .iter()
+            .filter(|matched| matched.kind == MatchKind::Command)
+            .map(|matched| {
+                let name = CommandName::new(matched.name.clone());
+                events.push(RuntimeEvent::CommandInvoked { name: name.clone() });
+                let result = self.commands.execute(&name, prompt.as_str());
+                events.push(RuntimeEvent::CommandCompleted {
+                    name,
+                    handled: result.handled,
+                });
+                result
+            })
+            .collect();
+
+        let tool_results: Vec<ToolResult> = matches
+            .iter()
+            .filter(|matched| matched.kind == MatchKind::Tool)
+            .filter(|matched| {
+                self.permissions
+                    .denial_for(&ToolName::new(matched.name.clone()))
+                    .is_none()
+            })
+            .map(|matched| {
+                let name = ToolName::new(matched.name.clone());
+                events.push(RuntimeEvent::ToolInvoked { name: name.clone() });
+                let result = self.tools.execute(&name, prompt.as_str());
+                events.push(RuntimeEvent::ToolCompleted {
+                    name,
+                    handled: result.handled,
+                });
+                result
+            })
+            .collect();
+
+        session.messages.push(prompt.clone());
+        session.usage = session.usage.add_turn(prompt.as_str(), "turn completed");
+        session.touch();
+        transcript.append(prompt);
+        transcript.flush();
+
+        events.push(RuntimeEvent::TurnCompleted {
+            stop_reason: "completed".into(),
+        });
+
+        let persisted_path = self.store.save(&session).map_err(|err| err.to_string())?;
+        events.push(RuntimeEvent::SessionPersisted {
+            path: persisted_path.display().to_string(),
+        });
+
+        Ok(ResumeReport {
+            resumed_session_id,
+            appended_turn_index,
+            session,
+            transcript,
+            matches,
+            denials,
+            command_results,
+            tool_results,
+            events,
+            persisted_path: persisted_path.display().to_string(),
+        })
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionListing>, String> {
         self.store.list().map_err(|err| err.to_string())
     }
@@ -271,6 +401,105 @@ mod tests {
                 (MatchKind::Tool, "ReadFile".to_string(), 1),
             ]
         );
+    }
+
+    #[test]
+    fn resume_appends_to_existing_session_and_emits_resume_event() {
+        use harness_core::{Prompt, RuntimeEvent, TurnIndex};
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let bootstrap = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap session");
+        let original_id = bootstrap.session.session_id.to_string();
+        let original_updated = bootstrap.session.updated_at_ms;
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let resumed = engine
+            .resume(&original_id, Prompt::new("summary please"))
+            .expect("resume existing session");
+
+        assert_eq!(resumed.resumed_session_id.to_string(), original_id);
+        assert_eq!(resumed.appended_turn_index, TurnIndex(1));
+        assert_eq!(resumed.session.session_id.to_string(), original_id);
+        assert_eq!(
+            resumed
+                .session
+                .messages
+                .iter()
+                .map(|prompt| prompt.0.clone())
+                .collect::<Vec<_>>(),
+            vec!["review bash".to_string(), "summary please".to_string()]
+        );
+        assert_eq!(resumed.session.created_at_ms, bootstrap.session.created_at_ms);
+        assert!(resumed.session.updated_at_ms >= original_updated);
+
+        assert!(resumed.events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::SessionResumed { session_id, turn_index }
+                if session_id.to_string() == original_id && *turn_index == TurnIndex(1)
+        )));
+        assert!(resumed.transcript.flushed);
+        assert_eq!(resumed.transcript.entries.len(), 2);
+
+        let reloaded = engine
+            .load_session(&original_id)
+            .expect("reload resumed session");
+        assert_eq!(reloaded, resumed.session);
+
+        let latest = engine
+            .load_session("latest")
+            .expect("latest should resolve to resumed session");
+        assert_eq!(latest.session_id.to_string(), original_id);
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn resume_latest_targets_most_recently_active_session() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let first = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap first session");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _second = engine
+            .bootstrap(Prompt::new("summary"))
+            .expect("bootstrap second session");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let resumed = engine
+            .resume(&first.session.session_id.to_string(), Prompt::new("follow up"))
+            .expect("resume first session");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let resumed_via_latest = engine
+            .resume("latest", Prompt::new("one more"))
+            .expect("resume via latest");
+
+        assert_eq!(
+            resumed_via_latest.resumed_session_id,
+            resumed.resumed_session_id,
+            "latest should point at most recently updated session"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }
 
     #[test]

@@ -55,18 +55,28 @@ pub struct SessionState {
     pub session_id: SessionId,
     #[serde(default = "current_timestamp_ms")]
     pub created_at_ms: u64,
+    #[serde(default = "current_timestamp_ms")]
+    pub updated_at_ms: u64,
     pub messages: Vec<Prompt>,
     pub usage: UsageSummary,
 }
 
 impl Default for SessionState {
     fn default() -> Self {
+        let now = current_timestamp_ms();
         Self {
             session_id: SessionId::new(),
-            created_at_ms: current_timestamp_ms(),
+            created_at_ms: now,
+            updated_at_ms: now,
             messages: Vec::new(),
             usage: UsageSummary::default(),
         }
+    }
+}
+
+impl SessionState {
+    pub fn touch(&mut self) {
+        self.updated_at_ms = current_timestamp_ms();
     }
 }
 
@@ -74,6 +84,7 @@ impl Default for SessionState {
 pub struct SessionListing {
     pub session_id: SessionId,
     pub created_at_ms: u64,
+    pub updated_at_ms: u64,
     pub message_count: usize,
     pub persisted_path: String,
 }
@@ -144,6 +155,7 @@ impl SessionStore {
             sessions.push(SessionListing {
                 session_id: session.session_id,
                 created_at_ms: session.created_at_ms,
+                updated_at_ms: session.updated_at_ms,
                 message_count: session.messages.len(),
                 persisted_path: path.display().to_string(),
             });
@@ -151,8 +163,9 @@ impl SessionStore {
 
         sessions.sort_by(|left, right| {
             right
-                .created_at_ms
-                .cmp(&left.created_at_ms)
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
                 .then_with(|| left.session_id.to_string().cmp(&right.session_id.to_string()))
                 .then_with(|| left.persisted_path.cmp(&right.persisted_path))
         });
@@ -184,6 +197,7 @@ mod tests {
         let session = SessionState {
             session_id: SessionId::new(),
             created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_001,
             messages: vec![Prompt::new("review the runtime lane")],
             usage: harness_core::UsageSummary {
                 input_tokens: 4,
@@ -228,6 +242,7 @@ mod tests {
         let older = SessionState {
             session_id: SessionId::new(),
             created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_000,
             messages: vec![Prompt::new("review bash")],
             usage: harness_core::UsageSummary {
                 input_tokens: 2,
@@ -237,6 +252,7 @@ mod tests {
         let newer = SessionState {
             session_id: SessionId::new(),
             created_at_ms: 1_700_000_000_100,
+            updated_at_ms: 1_700_000_000_100,
             messages: vec![Prompt::new("summary"), Prompt::new("tools")],
             usage: harness_core::UsageSummary {
                 input_tokens: 2,
@@ -300,6 +316,7 @@ mod tests {
         let older = SessionState {
             session_id: SessionId::new(),
             created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_000,
             messages: vec![Prompt::new("review bash")],
             usage: harness_core::UsageSummary {
                 input_tokens: 2,
@@ -309,6 +326,7 @@ mod tests {
         let newer = SessionState {
             session_id: SessionId::new(),
             created_at_ms: 1_700_000_000_100,
+            updated_at_ms: 1_700_000_000_100,
             messages: vec![Prompt::new("summary")],
             usage: harness_core::UsageSummary {
                 input_tokens: 1,
@@ -322,6 +340,59 @@ mod tests {
         let latest = store.latest().expect("load latest session");
 
         assert_eq!(latest, newer);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn latest_follows_updated_at_when_older_session_is_resumed() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+        let first = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_000,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+        };
+        let second = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_100,
+            updated_at_ms: 1_700_000_000_100,
+            messages: vec![Prompt::new("summary")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+
+        store.save(&first).expect("save first session");
+        store.save(&second).expect("save second session");
+
+        let mut resumed_first = first.clone();
+        resumed_first.updated_at_ms = 1_700_000_000_500;
+        resumed_first.messages.push(Prompt::new("follow up"));
+        store.save(&resumed_first).expect("save resumed first session");
+
+        let latest = store.latest().expect("load latest persisted session");
+        assert_eq!(latest, resumed_first);
+
+        let listed_ids: Vec<String> = store
+            .list()
+            .expect("list persisted sessions")
+            .into_iter()
+            .map(|session| session.session_id.to_string())
+            .collect();
+        assert_eq!(
+            listed_ids,
+            vec![
+                resumed_first.session_id.to_string(),
+                second.session_id.to_string(),
+            ]
+        );
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
     }

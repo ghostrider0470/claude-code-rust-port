@@ -179,9 +179,9 @@ Session and transcript concerns:
 - `TranscriptEntry`
 - `TranscriptStore`
 - `SessionStore`
-- recency metadata for persisted sessions
+- recency metadata for persisted sessions (`created_at_ms`) plus activity metadata (`updated_at_ms`) that bumps on resume so `latest` follows the most recently active session
 - compaction policy
-- disk persistence/load/list/latest
+- disk persistence/load/list/latest/resume-aware ordering
 
 ### harness-tools
 Tool concerns:
@@ -215,6 +215,7 @@ User-facing CLI:
 - `summary`
 - `route <prompt>`
 - `bootstrap <prompt>`
+- `resume <id> <prompt>` and `resume latest <prompt>` (append a new turn to an existing persisted session; output confirms the targeted session id and appended turn index)
 - `tools list`
 - `commands list`
 - `sessions` (newest-first)
@@ -226,6 +227,7 @@ User-facing CLI:
 The Rust runtime should expose a typed event stream. First event set:
 
 - `SessionStarted`
+- `SessionResumed`
 - `PromptReceived`
 - `RouteComputed`
 - `CommandMatched`

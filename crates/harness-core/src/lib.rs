@@ -99,6 +99,10 @@ pub enum RuntimeEvent {
     SessionStarted {
         session_id: SessionId,
     },
+    SessionResumed {
+        session_id: SessionId,
+        turn_index: TurnIndex,
+    },
     PromptReceived {
         prompt: Prompt,
     },
