@@ -49,7 +49,7 @@ The first meaningful milestone is:
 - tool and command registries
 - deterministic routing
 - runtime turn processor with structured events
-- CLI commands for summary, route, bootstrap, tools, commands, session listing, and session inspection
+- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, and session inspection
 
 See:
 
@@ -91,7 +91,7 @@ cargo run -p harness-cli -- --help
 
 ## CLI Usage Examples
 
-The examples below reflect the current seeded runtime surface and are protected by `cargo test -p harness-cli`. `bootstrap` creates a session file under `.sessions/`, which is gitignored, so the README uses stable placeholders for generated values that vary per run: `<session-id>` for ids, `<created-at-ms>` for persisted recency metadata, and matching `.sessions/<session-id>.json` paths.
+The examples below reflect the current seeded runtime surface and are protected by `cargo test -p harness-cli`. `bootstrap` creates a session file under `.sessions/`, which is gitignored, so the README uses stable placeholders for generated values that vary per run: `<session-id>` for ids, `<created-at-ms>` and `<updated-at-ms>` for persisted recency/activity metadata, and matching `.sessions/<session-id>.json` paths.
 
 ### `summary`
 
@@ -181,6 +181,7 @@ cargo run -q -p harness-cli -- bootstrap "review bash"
   "session": {
     "session_id": "<session-id>",
     "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
     "messages": [
       "review bash"
     ],
@@ -284,6 +285,115 @@ cargo run -q -p harness-cli -- bootstrap "review bash"
 }
 ```
 
+### `resume <id> "review summary"`
+
+Append a new turn to an existing persisted session. Pass either an explicit session id or the literal `latest` target. The resumed turn is appended to the same session file rather than starting a new session, and `updated_at_ms` is refreshed so subsequent `latest` lookups point at the most recently active session.
+
+```bash
+cargo run -q -p harness-cli -- resume <session-id> "review summary"
+```
+
+```json
+{
+  "resumed_session_id": "<session-id>",
+  "appended_turn_index": 1,
+  "session": {
+    "session_id": "<session-id>",
+    "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
+    "messages": [
+      "review bash",
+      "review summary"
+    ],
+    "usage": {
+      "input_tokens": 4,
+      "output_tokens": 4
+    }
+  },
+  "transcript": {
+    "entries": [
+      {
+        "turn_index": 0,
+        "prompt": "review bash"
+      },
+      {
+        "turn_index": 1,
+        "prompt": "review summary"
+      }
+    ],
+    "flushed": true
+  },
+  "matches": [
+    {
+      "kind": "command",
+      "name": "review",
+      "score": 1
+    }
+  ],
+  "denials": [],
+  "command_results": [
+    {
+      "name": "review",
+      "handled": true,
+      "message": "command 'review' would handle prompt \"review summary\""
+    }
+  ],
+  "tool_results": [],
+  "events": [
+    {
+      "SessionResumed": {
+        "session_id": "<session-id>",
+        "turn_index": 1
+      }
+    },
+    {
+      "PromptReceived": {
+        "prompt": "review summary"
+      }
+    },
+    {
+      "RouteComputed": {
+        "match_count": 1
+      }
+    },
+    {
+      "CommandMatched": {
+        "name": "review",
+        "score": 1
+      }
+    },
+    {
+      "CommandInvoked": {
+        "name": "review"
+      }
+    },
+    {
+      "CommandCompleted": {
+        "name": "review",
+        "handled": true
+      }
+    },
+    {
+      "TurnCompleted": {
+        "stop_reason": "completed"
+      }
+    },
+    {
+      "SessionPersisted": {
+        "path": ".sessions/<session-id>.json"
+      }
+    }
+  ],
+  "persisted_path": ".sessions/<session-id>.json"
+}
+```
+
+`latest` is supported as the resume target too:
+
+```bash
+cargo run -q -p harness-cli -- resume latest "review summary"
+```
+
 ### `sessions`
 
 ```bash
@@ -295,6 +405,7 @@ cargo run -q -p harness-cli -- sessions
   {
     "session_id": "<session-id>",
     "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
     "message_count": 1,
     "persisted_path": ".sessions/<session-id>.json"
   }
@@ -311,6 +422,7 @@ cargo run -q -p harness-cli -- session-show <session-id>
 {
   "session_id": "<session-id>",
   "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
   "messages": [
     "review bash"
   ],
@@ -331,6 +443,7 @@ cargo run -q -p harness-cli -- session-show latest
 {
   "session_id": "<session-id>",
   "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
   "messages": [
     "review bash"
   ],
@@ -352,9 +465,11 @@ Current protected Rust surface:
 - transcript compaction behavior in `harness-session`
 - deterministic route ordering in `harness-runtime`
 - bootstrap permission denial + session persistence behavior in `harness-runtime`
-- `harness-session` recency metadata, newest-first listing, and latest-session lookup
+- `harness-session` recency metadata, newest-first listing, latest-session lookup, and activity-ordered `latest` after a persisted session is resumed
 - README-backed CLI output regression coverage for `summary`, `route <prompt>`, `tools`, `commands`, and `sessions`
-- README-backed persisted-session example coverage for `bootstrap <prompt>`, `session-show <id>`, and `session-show latest`, with generated session identifiers normalized to `<session-id>` and generated recency metadata normalized to `<created-at-ms>` in test assertions
+- README-backed persisted-session example coverage for `bootstrap <prompt>`, `session-show <id>`, and `session-show latest`, with generated session identifiers normalized to `<session-id>` and generated recency metadata normalized to `<created-at-ms>` / `<updated-at-ms>` in test assertions
+- `harness-runtime` session resume behavior: an appended turn targets the original session id, bumps `updated_at_ms`, and emits a `SessionResumed` event; `resume latest` targets the most recently active session
+- README-backed CLI coverage for `resume <id> "review summary"` confirming the resumed turn is appended to the existing persisted session and the output exposes the targeted session id plus the appended turn index
 
 Validation commands:
 
@@ -409,3 +524,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI usage examples and validation flow
 - [x] cleanup of obsolete Python-first scaffolding
 - [x] move retained architecture-study snapshots under `archive/reference_data/`
+- [x] CLI session resume for persisted sessions (explicit id and `latest`)

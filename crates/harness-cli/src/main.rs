@@ -15,6 +15,7 @@ enum CliCommand {
     Summary,
     Route { prompt: String },
     Bootstrap { prompt: String },
+    Resume { id: String, prompt: String },
     Tools,
     Commands,
     Sessions,
@@ -33,6 +34,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .bootstrap(Prompt::new(prompt))
                 .expect("bootstrap runtime turn");
             serde_json::to_string_pretty(&report).expect("serialize bootstrap report")
+        }
+        CliCommand::Resume { id, prompt } => {
+            let report = engine
+                .resume(&id, Prompt::new(prompt))
+                .expect("resume persisted session");
+            serde_json::to_string_pretty(&report).expect("serialize resume report")
         }
         CliCommand::Tools => {
             serde_json::to_string_pretty(engine.tools.list()).expect("serialize tool list")
@@ -66,7 +73,7 @@ mod tests {
     use harness_session::{SessionState, SessionStore};
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const README: &str = include_str!("../../../README.md");
@@ -79,7 +86,7 @@ mod tests {
         std::env::temp_dir().join(format!("harness-cli-tests-{nonce}"))
     }
 
-    fn temp_engine(root: &PathBuf) -> RuntimeEngine {
+    fn temp_engine(root: &Path) -> RuntimeEngine {
         RuntimeEngine {
             commands: CommandRegistry::seeded(),
             tools: ToolRegistry::seeded(),
@@ -113,27 +120,32 @@ mod tests {
             .to_string()
     }
 
-    fn normalize_created_at_ms(output: &str) -> String {
-        let marker = "\"created_at_ms\": ";
-        if let Some(start) = output.find(marker) {
+    fn normalize_timestamp_field(output: &str, field: &str, placeholder: &str) -> String {
+        let marker = format!("\"{field}\": ");
+        let mut remaining = output;
+        let mut normalized = String::with_capacity(output.len());
+        while let Some(start) = remaining.find(&marker) {
             let value_start = start + marker.len();
-            let value_end = output[value_start..]
+            let value_end = remaining[value_start..]
                 .find(|ch: char| !ch.is_ascii_digit())
                 .map(|offset| value_start + offset)
-                .unwrap_or(output.len());
+                .unwrap_or(remaining.len());
 
-            let mut normalized = String::with_capacity(output.len());
-            normalized.push_str(&output[..value_start]);
-            normalized.push_str("<created-at-ms>");
-            normalized.push_str(&output[value_end..]);
-            normalized
-        } else {
-            output.to_string()
+            normalized.push_str(&remaining[..value_start]);
+            normalized.push_str(placeholder);
+            remaining = &remaining[value_end..];
         }
+        normalized.push_str(remaining);
+        normalized
     }
 
-    fn normalize_bootstrap_example(output: &str, session_id: &str, root: &PathBuf) -> String {
-        normalize_created_at_ms(
+    fn normalize_timestamps(output: &str) -> String {
+        let stage_one = normalize_timestamp_field(output, "created_at_ms", "<created-at-ms>");
+        normalize_timestamp_field(&stage_one, "updated_at_ms", "<updated-at-ms>")
+    }
+
+    fn normalize_bootstrap_example(output: &str, session_id: &str, root: &Path) -> String {
+        normalize_timestamps(
             &output
                 .replace(session_id, "<session-id>")
                 .replace(root.to_string_lossy().as_ref(), ".sessions"),
@@ -141,7 +153,7 @@ mod tests {
     }
 
     fn normalize_session_output(output: &str, session_id: &str) -> String {
-        normalize_created_at_ms(&output.replace(session_id, "<session-id>"))
+        normalize_timestamps(&output.replace(session_id, "<session-id>"))
     }
 
     #[test]
@@ -264,6 +276,72 @@ mod tests {
         assert_eq!(
             normalize_session_output(&session_output, &session_id),
             readme_output_block("session-show <id>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn resume_matches_readme_example_and_targets_existing_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let resume_output = render_command(
+            &engine,
+            CliCommand::Resume {
+                id: session_id.clone(),
+                prompt: "review summary".to_string(),
+            },
+        );
+
+        let resume_json: serde_json::Value =
+            serde_json::from_str(&resume_output).expect("parse resume report");
+        assert_eq!(
+            resume_json["resumed_session_id"].as_str(),
+            Some(session_id.as_str()),
+            "resume report must confirm the targeted session id"
+        );
+        assert_eq!(
+            resume_json["appended_turn_index"].as_u64(),
+            Some(1),
+            "resume report must expose the appended turn index"
+        );
+
+        assert_eq!(
+            normalize_bootstrap_example(&resume_output, &session_id, &root),
+            readme_output_block("resume <id> \"review summary\"", "json")
+        );
+
+        let reloaded_output = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                id: session_id.clone(),
+            },
+        );
+        let reloaded: SessionState =
+            serde_json::from_str(&reloaded_output).expect("parse reloaded session");
+        let reloaded_messages: Vec<String> = reloaded
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            reloaded_messages,
+            vec!["review bash".to_string(), "review summary".to_string()],
+            "resume must append to the existing persisted session"
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");

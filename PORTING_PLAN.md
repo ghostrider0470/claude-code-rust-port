@@ -60,6 +60,7 @@ Build a Rust-native Claude Code-style CLI/runtime that Hamza can use as a primar
 - [x] `summary`
 - [x] `route <prompt>`
 - [x] `bootstrap <prompt>`
+- [x] `resume <id> <prompt>` (and `resume latest <prompt>`) — append a new turn to an existing persisted session; output confirms the targeted session id, the appended turn index, and the refreshed `updated_at_ms` activity metadata
 - [x] `tools`
 - [x] `commands`
 - [x] `session-show <id>`
