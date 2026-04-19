@@ -6,7 +6,8 @@ use harness_session::{
     SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
     SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionPin, SessionPinEntry,
     SessionPrune, SessionRename, SessionRetag, SessionSelectorCheck, SessionState, SessionStore,
-    SessionTranscriptTail, SessionUnlabel, SessionUnpin, TranscriptRecord, TranscriptStore,
+    SessionTranscriptFind, SessionTranscriptTail, SessionUnlabel, SessionUnpin, TranscriptRecord,
+    TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -509,6 +510,16 @@ impl RuntimeEngine {
     ) -> Result<SessionTranscriptTail, String> {
         self.store
             .tail_transcript(selector, count)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn find_in_session_transcript(
+        &self,
+        selector: &str,
+        query: &str,
+    ) -> Result<SessionTranscriptFind, String> {
+        self.store
+            .find_in_transcript(selector, query)
             .map_err(|err| err.to_string())
     }
 

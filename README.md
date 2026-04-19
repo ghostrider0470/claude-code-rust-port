@@ -539,6 +539,34 @@ cargo run -q -p harness-cli -- transcript-tail label:runtime-review --count 1
 }
 ```
 
+### `transcript-find <selector> <query>`
+
+Search the persisted transcript for a single selected session by prompt text without touching any other session. Accepts the same selector forms every other single-session command accepts — a raw `session_id`, `latest`, or `label:<name>` — routed through the shared selector-resolution path so behavior is identical to `session-show`, `transcript-show`, `transcript-tail`, etc. The query is matched case-insensitively as a substring against each transcript entry's prompt text (mirroring `session-find` semantics), and an empty query is treated as a no-op that returns zero matches rather than erroring. Output uses a deterministic shape: `{ selector, resolved_session_id, query, created_at_ms, updated_at_ms, total_entries, match_count, matches }`, where `selector` echoes the raw input, `resolved_session_id` is the persisted id the selector actually maps to, `total_entries` is the full transcript length, `match_count == matches.len()`, and each entry in `matches` records the matched `turn_index` plus the persisted `prompt` text in the source transcript's `turn_index` order so callers can jump straight to the matched turn. Selector failure semantics are unchanged: unknown ids and unknown labels surface as `session not found`, duplicate labels surface as `ambiguous label`, and `label:` with no name surfaces as `malformed selector`. No persisted session state, transcript entry, label, pinned flag, id, path, or ordering metadata is mutated.
+
+```bash
+cargo run -q -p harness-cli -- transcript-find <session-id> review
+cargo run -q -p harness-cli -- transcript-find latest review
+cargo run -q -p harness-cli -- transcript-find label:runtime-review review
+```
+
+```json
+{
+  "selector": "<session-id>",
+  "resolved_session_id": "<session-id>",
+  "query": "review",
+  "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
+  "total_entries": 1,
+  "match_count": 1,
+  "matches": [
+    {
+      "turn_index": 0,
+      "prompt": "review bash"
+    }
+  ]
+}
+```
+
 ### `session-export <id>`
 
 Export one persisted session as a single machine-readable JSON bundle that packages the session state and its transcript together. The output uses a deterministic shape: `{ exported_session_id, session, transcript }`, where `session` is the same structure printed by `session-show` and `transcript` is the same structure printed by `transcript-show`. The `exported_session_id` confirms which session was exported and always equals the `session_id` inside both nested records. Turn ordering in `transcript.entries` is preserved in `turn_index` order so the bundle is safe to attach to bug reports or archive outside the repo-local `.sessions/` layout.
@@ -1207,6 +1235,9 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::tail_transcript` behavior: routes the selector through the shared `resolve_selector` machinery, returns the newest `count` entries from the persisted transcript preserving `turn_index` ordering, caps a larger-than-transcript count at every available entry, treats `count == 0` as a clean empty tail, exposes `total_entries` and `returned_entries` alongside the trimmed `entries`, leaves persisted session state, transcripts, labels, pinned flags, ids, paths, and ordering metadata untouched, and preserves existing selector failure semantics (unknown id/label → `SessionNotFound`, duplicate labels → `AmbiguousLabel`, empty `label:` → `MalformedSelector`)
 - `harness-runtime` `tail_session_transcript` behavior: delegates to the store so the CLI surface shares selector resolution with every other single-session command, and surfaces unknown / ambiguous / malformed selectors as distinct, descriptive errors without mutating any persisted state
 - README-backed CLI coverage for `transcript-tail <id>`, `transcript-tail latest --count <n>`, and `transcript-tail label:<name> --count <n>` confirming the output echoes the raw selector, identifies the resolved `session_id`, reports `total_entries` / `returned_entries`, preserves `turn_index` ordering in the returned tail, handles empty transcripts and `--count` values larger than the transcript cleanly, and surfaces unknown ids/labels, duplicate labels, and malformed label selectors as distinct diagnostics without mutating persisted state
+- `harness-session` `SessionStore::find_in_transcript` behavior: routes the selector through the shared `resolve_selector` machinery, matches transcript prompt text case-insensitively as a substring, preserves `turn_index` ordering inside `matches`, treats both the empty query and no-match queries as a clean empty `matches` array with `match_count == 0`, exposes `selector`, `resolved_session_id`, `query`, `total_entries`, and `match_count` alongside `matches`, leaves persisted session state, transcripts, labels, pinned flags, ids, paths, and ordering metadata untouched, and preserves existing selector failure semantics (unknown id/label → `SessionNotFound`, duplicate labels → `AmbiguousLabel`, empty `label:` → `MalformedSelector`)
+- `harness-runtime` `find_in_session_transcript` behavior: delegates to the store so the CLI surface shares selector resolution with every other single-session command, and surfaces unknown / ambiguous / malformed selectors as distinct, descriptive errors without mutating any persisted state
+- CLI coverage for `transcript-find <id> <query>`, `transcript-find latest <query>`, and `transcript-find label:<name> <query>` confirming the output echoes the raw selector and query, identifies the resolved `session_id`, reports `total_entries` / `match_count`, preserves `turn_index` ordering in `matches`, handles empty queries and no-match queries cleanly, and surfaces unknown ids/labels, duplicate labels, and malformed label selectors as distinct diagnostics without mutating persisted state
 
 Validation commands:
 

@@ -401,6 +401,18 @@ pub struct SessionTranscriptTail {
     pub entries: Vec<TranscriptEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptFind {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub query: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub match_count: usize,
+    pub matches: Vec<SessionFindMatch>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -514,6 +526,49 @@ impl SessionStore {
             total_entries: total,
             returned_entries: entries.len(),
             entries,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and search the
+    /// matching persisted transcript for entries whose prompt text contains
+    /// `query` case-insensitively (mirroring `find()` query semantics).
+    /// Matches preserve the transcript's original `turn_index` ordering. An
+    /// empty query matches zero entries. The persisted transcript is not
+    /// mutated. Preserves existing selector failure semantics unchanged
+    /// (`SessionNotFound` / `AmbiguousLabel` / `MalformedSelector`).
+    pub fn find_in_transcript(
+        &self,
+        selector: &str,
+        query: &str,
+    ) -> Result<SessionTranscriptFind, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total = transcript.entries.len();
+
+        let matches: Vec<SessionFindMatch> = if query.is_empty() {
+            Vec::new()
+        } else {
+            let needle = query.to_ascii_lowercase();
+            transcript
+                .entries
+                .iter()
+                .filter(|entry| entry.prompt.0.to_ascii_lowercase().contains(&needle))
+                .map(|entry| SessionFindMatch {
+                    turn_index: entry.turn_index,
+                    prompt: entry.prompt.clone(),
+                })
+                .collect()
+        };
+
+        Ok(SessionTranscriptFind {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            query: query.to_string(),
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries: total,
+            match_count: matches.len(),
+            matches,
         })
     }
 
