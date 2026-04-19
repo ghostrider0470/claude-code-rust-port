@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use harness_core::Prompt;
 use harness_runtime::RuntimeEngine;
-use harness_session::DEFAULT_TRANSCRIPT_TAIL_COUNT;
+use harness_session::{DEFAULT_TRANSCRIPT_RANGE_COUNT, DEFAULT_TRANSCRIPT_TAIL_COUNT};
 
 #[derive(Debug, Parser)]
 #[command(name = "harness")]
@@ -48,6 +48,13 @@ enum CliCommand {
     TranscriptFind {
         selector: String,
         query: String,
+    },
+    TranscriptRange {
+        selector: String,
+        #[arg(long)]
+        start: usize,
+        #[arg(long, default_value_t = DEFAULT_TRANSCRIPT_RANGE_COUNT)]
+        count: usize,
     },
 }
 
@@ -186,6 +193,16 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("search persisted session transcript");
             serde_json::to_string_pretty(&find).expect("serialize transcript find")
         }
+        CliCommand::TranscriptRange {
+            selector,
+            start,
+            count,
+        } => {
+            let range = engine
+                .range_session_transcript(&selector, start, count)
+                .expect("range persisted session transcript");
+            serde_json::to_string_pretty(&range).expect("serialize transcript range")
+        }
     }
 }
 
@@ -198,15 +215,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_command, CliCommand};
+    use super::{render_command, Cli, CliCommand};
     use harness_commands::CommandRegistry;
     use harness_runtime::RuntimeEngine;
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
         SessionImport, SessionLabelEntry, SessionPin, SessionPinEntry, SessionPrune, SessionRename,
         SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionTranscriptFind,
-        SessionTranscriptTail, SessionUnlabel, SessionUnpin, TranscriptRecord,
-        DEFAULT_TRANSCRIPT_TAIL_COUNT,
+        SessionTranscriptRange, SessionTranscriptTail, SessionUnlabel, SessionUnpin,
+        TranscriptRecord, DEFAULT_TRANSCRIPT_RANGE_COUNT, DEFAULT_TRANSCRIPT_TAIL_COUNT,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -3516,6 +3533,343 @@ mod tests {
 
         let err = engine
             .find_in_session_transcript("label:", "anything")
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_range_raw_id_returns_bounded_forward_slice_in_turn_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptRange {
+                selector: id.clone(),
+                start: 1,
+                count: 2,
+            },
+        );
+        let range: SessionTranscriptRange =
+            serde_json::from_str(&output).expect("parse transcript-range output");
+
+        assert_eq!(range.selector, id);
+        assert_eq!(range.resolved_session_id.to_string(), id);
+        assert_eq!(range.start_turn_index, 1);
+        assert_eq!(range.requested_count, 2);
+        assert_eq!(range.total_entries, 4);
+        assert_eq!(range.returned_entries, 2);
+        let returned_prompts: Vec<&str> = range
+            .entries
+            .iter()
+            .map(|entry| entry.prompt.0.as_str())
+            .collect();
+        assert_eq!(returned_prompts, vec!["second prompt", "third prompt"]);
+        let returned_indices: Vec<usize> =
+            range.entries.iter().map(|entry| entry.turn_index.0).collect();
+        assert_eq!(returned_indices, vec![1, 2]);
+
+        let after_transcript = engine.load_transcript(&id).expect("reload after range");
+        assert_eq!(after_transcript, before_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_range_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer transcript");
+        extend_transcript(&engine, &newer, &["newer follow-up", "newer third"]);
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptRange {
+                selector: "latest".to_string(),
+                start: 1,
+                count: DEFAULT_TRANSCRIPT_RANGE_COUNT,
+            },
+        );
+        let range: SessionTranscriptRange =
+            serde_json::from_str(&output).expect("parse transcript-range latest output");
+
+        assert_eq!(range.selector, "latest");
+        assert_eq!(range.resolved_session_id.to_string(), newer);
+        assert_eq!(range.start_turn_index, 1);
+        assert_eq!(range.requested_count, DEFAULT_TRANSCRIPT_RANGE_COUNT);
+        assert_eq!(range.total_entries, 3);
+        assert_eq!(range.returned_entries, 2);
+        let prompts: Vec<&str> = range
+            .entries
+            .iter()
+            .map(|entry| entry.prompt.0.as_str())
+            .collect();
+        assert_eq!(prompts, vec!["newer follow-up", "newer third"]);
+        let indices: Vec<usize> =
+            range.entries.iter().map(|entry| entry.turn_index.0).collect();
+        assert_eq!(indices, vec![1, 2]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_range_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled transcript");
+        extend_transcript(
+            &engine,
+            &id,
+            &["labeled follow-up", "labeled third", "labeled fourth"],
+        );
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for range");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptRange {
+                selector: "label:runtime-review".to_string(),
+                start: 0,
+                count: 2,
+            },
+        );
+        let range: SessionTranscriptRange =
+            serde_json::from_str(&output).expect("parse transcript-range label output");
+
+        assert_eq!(range.selector, "label:runtime-review");
+        assert_eq!(range.resolved_session_id.to_string(), id);
+        assert_eq!(range.start_turn_index, 0);
+        assert_eq!(range.requested_count, 2);
+        assert_eq!(range.total_entries, 4);
+        assert_eq!(range.returned_entries, 2);
+        let prompts: Vec<&str> = range
+            .entries
+            .iter()
+            .map(|entry| entry.prompt.0.as_str())
+            .collect();
+        assert_eq!(prompts, vec!["labeled transcript", "labeled follow-up"]);
+
+        let reloaded = engine.load_session(&id).expect("reload after range");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_range_partial_tail_returns_available_remaining_entries() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let range = engine
+            .range_session_transcript(&id, 2, 5)
+            .expect("partial tail range should succeed");
+
+        assert_eq!(range.start_turn_index, 2);
+        assert_eq!(range.requested_count, 5);
+        assert_eq!(range.total_entries, 3);
+        assert_eq!(range.returned_entries, 1);
+        assert_eq!(range.entries.len(), 1);
+        assert_eq!(range.entries[0].turn_index.0, 2);
+        assert_eq!(range.entries[0].prompt.0, "third prompt");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_range_out_of_range_start_returns_empty_entries_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt"]);
+
+        let range = engine
+            .range_session_transcript(&id, 42, 5)
+            .expect("out-of-range start should succeed");
+
+        assert_eq!(range.start_turn_index, 42);
+        assert_eq!(range.requested_count, 5);
+        assert_eq!(range.total_entries, 2);
+        assert_eq!(range.returned_entries, 0);
+        assert!(range.entries.is_empty());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_range_empty_transcript_returns_empty_entries_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        let range = engine
+            .range_session_transcript(&session_id, 0, DEFAULT_TRANSCRIPT_RANGE_COUNT)
+            .expect("empty transcript should succeed");
+
+        assert_eq!(range.start_turn_index, 0);
+        assert_eq!(range.requested_count, DEFAULT_TRANSCRIPT_RANGE_COUNT);
+        assert_eq!(range.total_entries, 0);
+        assert_eq!(range.returned_entries, 0);
+        assert!(range.entries.is_empty());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_range_count_zero_returns_empty_entries_without_erroring() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt"]);
+
+        let range = engine
+            .range_session_transcript(&id, 0, 0)
+            .expect("count=0 should succeed");
+
+        assert_eq!(range.start_turn_index, 0);
+        assert_eq!(range.requested_count, 0);
+        assert_eq!(range.total_entries, 2);
+        assert_eq!(range.returned_entries, 0);
+        assert!(range.entries.is_empty());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_range_invalid_count_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-range",
+            "some-id",
+            "--start",
+            "0",
+            "--count",
+            "-1",
+        ])
+        .expect_err("negative --count must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--count") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --count value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-range",
+            "some-id",
+            "--start",
+            "0",
+            "--count",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --count must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--count") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --count value, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn transcript_range_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .range_session_transcript("00000000-0000-0000-0000-000000000000", 0, 5)
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .range_session_transcript("label:nonexistent", 0, 5)
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        assert!(engine.load_session(&anchor).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_range_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine.rename_session(&first, "duplicate").expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
+
+        let err = engine
+            .range_session_transcript("label:duplicate", 0, 5)
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_range_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .range_session_transcript("label:", 0, 5)
             .expect_err("empty label should fail");
         assert!(
             err.contains("malformed session selector"),
