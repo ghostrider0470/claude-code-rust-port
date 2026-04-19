@@ -31,6 +31,10 @@ enum CliCommand {
     SessionUnlabel { id: String },
     SessionRetag { id: String, label: String },
     SessionLabels,
+    SessionPrune {
+        #[arg(long)]
+        keep: usize,
+    },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -130,6 +134,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("list persisted session labels");
             serde_json::to_string_pretty(&labels).expect("serialize session labels")
         }
+        CliCommand::SessionPrune { keep } => {
+            let pruned = engine
+                .prune_sessions(keep)
+                .expect("prune persisted sessions");
+            serde_json::to_string_pretty(&pruned).expect("serialize session prune")
+        }
     }
 }
 
@@ -147,8 +157,8 @@ mod tests {
     use harness_runtime::RuntimeEngine;
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
-        SessionImport, SessionLabelEntry, SessionRename, SessionRetag, SessionState, SessionStore,
-        SessionUnlabel, TranscriptRecord,
+        SessionImport, SessionLabelEntry, SessionPrune, SessionRename, SessionRetag, SessionState,
+        SessionStore, SessionUnlabel, TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -2298,6 +2308,166 @@ mod tests {
             normalize_session_output(&latest_output, &session_id),
             readme_output_block("session-show latest", "json")
         );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    fn bootstrap_session_id(engine: &RuntimeEngine, prompt: &str) -> String {
+        let output = render_command(
+            engine,
+            CliCommand::Bootstrap {
+                prompt: prompt.to_string(),
+            },
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("parse bootstrap report");
+        parsed["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string()
+    }
+
+    #[test]
+    fn session_prune_matches_readme_example_and_preserves_newest_and_removes_older_artifacts() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let older_id = bootstrap_session_id(&engine, "older prompt");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer_id = bootstrap_session_id(&engine, "newer prompt");
+
+        let output = render_command(&engine, CliCommand::SessionPrune { keep: 1 });
+
+        // Newer session wins newest-first ordering; older one is pruned.
+        let prune: SessionPrune =
+            serde_json::from_str(&output).expect("parse session-prune output");
+        assert_eq!(prune.kept_count, 1);
+        assert_eq!(prune.pruned_count, 1);
+        assert_eq!(prune.removed.len(), 1);
+        assert_eq!(prune.removed[0].session_id.to_string(), older_id);
+        assert_eq!(
+            prune.removed[0].session_path,
+            root.join(format!("{older_id}.json")).display().to_string()
+        );
+        assert_eq!(
+            prune.removed[0].transcript_path,
+            root.join(format!("{older_id}.transcript.json"))
+                .display()
+                .to_string()
+        );
+
+        // README regression guard: normalize the generated pruned id and the
+        // temp root back to the documented placeholders before comparing.
+        let normalized = output
+            .replace(&older_id, "<pruned-session-id>")
+            .replace(root.to_string_lossy().as_ref(), ".sessions");
+        assert_eq!(
+            normalized,
+            readme_output_block("session-prune --keep <count>", "json")
+        );
+
+        // Pruned artifacts are gone from disk and from the subsequent listing,
+        // while the preserved session stays newest-first.
+        assert!(!root.join(format!("{older_id}.json")).exists());
+        assert!(!root.join(format!("{older_id}.transcript.json")).exists());
+
+        let remaining: Vec<String> = engine
+            .list_sessions()
+            .expect("list after prune")
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(remaining, vec![newer_id.clone()]);
+
+        // Preserved session still loads with transcript entries intact.
+        let transcript = engine
+            .load_transcript(&newer_id)
+            .expect("load preserved transcript");
+        assert_eq!(transcript.entries.len(), 1);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_prune_noop_matches_readme_example_when_store_is_within_retention() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let kept_id = bootstrap_session_id(&engine, "only prompt");
+
+        let output = render_command(&engine, CliCommand::SessionPrune { keep: 10 });
+        let prune: SessionPrune =
+            serde_json::from_str(&output).expect("parse session-prune no-op output");
+        assert_eq!(prune.kept_count, 1);
+        assert_eq!(prune.pruned_count, 0);
+        assert!(prune.removed.is_empty());
+
+        assert_eq!(
+            output,
+            readme_output_block("session-prune <no-op>", "json")
+        );
+
+        // Nothing was removed: the session is still loadable with its
+        // transcript intact.
+        let remaining: Vec<String> = engine
+            .list_sessions()
+            .expect("list after no-op prune")
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(remaining, vec![kept_id.clone()]);
+        assert_eq!(
+            engine
+                .load_transcript(&kept_id)
+                .expect("load transcript after no-op prune")
+                .entries
+                .len(),
+            1
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_prune_keep_zero_removes_every_persisted_session_via_cli_dispatch() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "second");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let c = bootstrap_session_id(&engine, "third");
+
+        let output = render_command(&engine, CliCommand::SessionPrune { keep: 0 });
+        let prune: SessionPrune =
+            serde_json::from_str(&output).expect("parse session-prune keep=0 output");
+
+        assert_eq!(prune.kept_count, 0);
+        assert_eq!(prune.pruned_count, 3);
+        let removed_ids: Vec<String> = prune
+            .removed
+            .iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(removed_ids, vec![c.clone(), b.clone(), a.clone()]);
+
+        // Every removed entry reports the deterministic session/transcript
+        // path pair for its id.
+        for (removal, id) in prune.removed.iter().zip([&c, &b, &a]) {
+            assert_eq!(
+                removal.session_path,
+                root.join(format!("{id}.json")).display().to_string()
+            );
+            assert_eq!(
+                removal.transcript_path,
+                root.join(format!("{id}.transcript.json"))
+                    .display()
+                    .to_string()
+            );
+        }
+
+        assert!(engine.list_sessions().expect("list after full prune").is_empty());
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }

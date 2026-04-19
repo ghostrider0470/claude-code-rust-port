@@ -235,6 +235,20 @@ pub struct SessionRetag {
     pub applied_label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPruneRemoval {
+    pub session_id: SessionId,
+    pub session_path: String,
+    pub transcript_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPrune {
+    pub kept_count: usize,
+    pub pruned_count: usize,
+    pub removed: Vec<SessionPruneRemoval>,
+}
+
 pub fn normalize_label(raw: &str) -> Result<String, RuntimeError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -461,6 +475,44 @@ impl SessionStore {
         Ok(SessionDeletion {
             deleted_session_id: session.session_id,
             removed_paths,
+        })
+    }
+
+    /// Preserve the newest `keep` persisted sessions (using the same
+    /// newest-first ordering as `list()`) and remove every older persisted
+    /// session together with its sibling transcript JSON. Preserved sessions
+    /// are never mutated — their label, transcript entries, and activity
+    /// metadata are untouched. If the store already contains `<= keep`
+    /// sessions the call succeeds cleanly with an empty `removed` list.
+    /// `keep == 0` is supported and prunes every persisted session.
+    pub fn prune(&self, keep: usize) -> Result<SessionPrune, RuntimeError> {
+        let listings = self.list()?;
+        let total = listings.len();
+        let kept_count = total.min(keep);
+
+        let mut removed = Vec::new();
+        for listing in listings.into_iter().skip(kept_count) {
+            let id = listing.session_id.to_string();
+            let session_path = self.root.join(format!("{id}.json"));
+            let transcript_path = self.transcript_path(&id);
+
+            fs::remove_file(&session_path).map_err(|err| RuntimeError::Io(err.to_string()))?;
+            if transcript_path.exists() {
+                fs::remove_file(&transcript_path)
+                    .map_err(|err| RuntimeError::Io(err.to_string()))?;
+            }
+
+            removed.push(SessionPruneRemoval {
+                session_id: listing.session_id,
+                session_path: session_path.display().to_string(),
+                transcript_path: transcript_path.display().to_string(),
+            });
+        }
+
+        Ok(SessionPrune {
+            kept_count,
+            pruned_count: removed.len(),
+            removed,
         })
     }
 
@@ -2400,5 +2452,196 @@ mod tests {
             normalize_label("   \t\n"),
             Err(RuntimeError::InvalidLabel(_))
         ));
+    }
+
+    fn seed_session(store: &SessionStore, updated_at_ms: u64, label: Option<&str>) -> SessionState {
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: updated_at_ms,
+            updated_at_ms,
+            messages: vec![Prompt::new("seed prompt")],
+            usage: harness_core::UsageSummary::default(),
+            label: label.map(|value| value.to_string()),
+        };
+        store.save(&session).expect("save seeded session");
+
+        let transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: updated_at_ms,
+            updated_at_ms,
+            entries: vec![TranscriptEntry {
+                turn_index: TurnIndex(0),
+                prompt: Prompt::new("seed prompt"),
+            }],
+        };
+        store
+            .save_transcript(&transcript)
+            .expect("save seeded transcript");
+
+        session
+    }
+
+    #[test]
+    fn prune_preserves_newest_n_and_removes_older_session_and_transcript_pairs() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let oldest = seed_session(&store, 1_700_000_000_000, Some("old-label"));
+        let middle = seed_session(&store, 1_700_000_000_100, None);
+        let newest = seed_session(&store, 1_700_000_000_200, Some("newest-label"));
+
+        let outcome = store.prune(2).expect("prune keep 2");
+
+        assert_eq!(outcome.kept_count, 2);
+        assert_eq!(outcome.pruned_count, 1);
+        assert_eq!(outcome.removed.len(), 1);
+        assert_eq!(
+            outcome.removed[0].session_id.to_string(),
+            oldest.session_id.to_string(),
+            "prune must target the oldest session"
+        );
+        assert_eq!(
+            outcome.removed[0].session_path,
+            root.join(format!("{}.json", oldest.session_id))
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            outcome.removed[0].transcript_path,
+            root.join(format!("{}.transcript.json", oldest.session_id))
+                .display()
+                .to_string()
+        );
+
+        // Oldest artifacts are gone.
+        assert!(
+            !root.join(format!("{}.json", oldest.session_id)).exists(),
+            "pruned session JSON must be removed"
+        );
+        assert!(
+            !root
+                .join(format!("{}.transcript.json", oldest.session_id))
+                .exists(),
+            "pruned transcript JSON must be removed"
+        );
+
+        // Preserved sessions are untouched: identity, label, recency, transcript
+        // contents, and `turn_index` ordering all match what was saved.
+        let reloaded_middle = store
+            .load(&middle.session_id.to_string())
+            .expect("reload middle");
+        let reloaded_newest = store
+            .load(&newest.session_id.to_string())
+            .expect("reload newest");
+        assert_eq!(reloaded_middle, middle);
+        assert_eq!(reloaded_newest, newest);
+
+        let transcript_middle = store
+            .load_transcript(&middle.session_id.to_string())
+            .expect("reload middle transcript");
+        assert_eq!(transcript_middle.entries.len(), 1);
+        assert_eq!(transcript_middle.entries[0].turn_index.0, 0);
+
+        // Listing ordering now contains only the preserved sessions in
+        // newest-first order.
+        let remaining: Vec<String> = store
+            .list()
+            .expect("list after prune")
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                newest.session_id.to_string(),
+                middle.session_id.to_string(),
+            ]
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn prune_keep_zero_removes_every_persisted_session_deterministically() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let a = seed_session(&store, 1_700_000_000_000, None);
+        let b = seed_session(&store, 1_700_000_000_100, Some("labelled"));
+        let c = seed_session(&store, 1_700_000_000_200, None);
+
+        let outcome = store.prune(0).expect("prune keep 0");
+        assert_eq!(outcome.kept_count, 0);
+        assert_eq!(outcome.pruned_count, 3);
+
+        // Removal order must match newest-first ordering.
+        let removed_ids: Vec<String> = outcome
+            .removed
+            .iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(
+            removed_ids,
+            vec![
+                c.session_id.to_string(),
+                b.session_id.to_string(),
+                a.session_id.to_string(),
+            ]
+        );
+
+        // Each removed entry carries the deterministic session/transcript paths.
+        for (removal, session) in outcome.removed.iter().zip([&c, &b, &a]) {
+            assert_eq!(
+                removal.session_path,
+                root.join(format!("{}.json", session.session_id))
+                    .display()
+                    .to_string()
+            );
+            assert_eq!(
+                removal.transcript_path,
+                root.join(format!("{}.transcript.json", session.session_id))
+                    .display()
+                    .to_string()
+            );
+        }
+
+        assert!(store.list().expect("list after full prune").is_empty());
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn prune_keep_equal_or_greater_than_total_is_noop_with_empty_removed() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let a = seed_session(&store, 1_700_000_000_000, None);
+        let b = seed_session(&store, 1_700_000_000_100, None);
+
+        let equal = store.prune(2).expect("prune keep == total");
+        assert_eq!(equal.kept_count, 2);
+        assert_eq!(equal.pruned_count, 0);
+        assert!(equal.removed.is_empty(), "keep == total must not prune");
+
+        let greater = store.prune(5).expect("prune keep > total");
+        assert_eq!(greater.kept_count, 2);
+        assert_eq!(greater.pruned_count, 0);
+        assert!(greater.removed.is_empty(), "keep > total must not prune");
+
+        // Sessions still on disk and still reloadable unchanged.
+        assert_eq!(store.load(&a.session_id.to_string()).unwrap(), a);
+        assert_eq!(store.load(&b.session_id.to_string()).unwrap(), b);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn prune_on_empty_store_succeeds_with_zero_kept_and_empty_removed() {
+        let missing_root = temp_session_root();
+        let store = SessionStore::new(&missing_root);
+        let outcome = store.prune(3).expect("prune empty store");
+        assert_eq!(outcome.kept_count, 0);
+        assert_eq!(outcome.pruned_count, 0);
+        assert!(outcome.removed.is_empty());
     }
 }

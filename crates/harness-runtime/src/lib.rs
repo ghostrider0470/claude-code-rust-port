@@ -4,8 +4,8 @@ use harness_core::{
 };
 use harness_session::{
     SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
-    SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionRename, SessionRetag,
-    SessionState, SessionStore, SessionUnlabel, TranscriptRecord, TranscriptStore,
+    SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionPrune, SessionRename,
+    SessionRetag, SessionState, SessionStore, SessionUnlabel, TranscriptRecord, TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -472,6 +472,10 @@ impl RuntimeEngine {
     pub fn delete_session(&self, target: &str) -> Result<SessionDeletion, String> {
         let resolved = self.resolve_selector(target)?;
         self.store.delete(&resolved).map_err(|err| err.to_string())
+    }
+
+    pub fn prune_sessions(&self, keep: usize) -> Result<SessionPrune, String> {
+        self.store.prune(keep).map_err(|err| err.to_string())
     }
 
     fn comparison_side_for(&self, id: &str) -> Result<SessionComparisonSide, String> {
@@ -1642,6 +1646,58 @@ mod tests {
             missing_result.unwrap_err().contains("session not found"),
             "missing target error should mention session not found"
         );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn prune_sessions_delegates_to_store_and_preserves_newest_n_via_bootstrap_pipeline() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let first = engine.bootstrap(Prompt::new("first")).expect("bootstrap 1");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = engine.bootstrap(Prompt::new("second")).expect("bootstrap 2");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let third = engine.bootstrap(Prompt::new("third")).expect("bootstrap 3");
+
+        // Keep the newest two sessions. Only the oldest (`first`) should be pruned.
+        let outcome = engine.prune_sessions(2).expect("prune keep 2");
+        assert_eq!(outcome.kept_count, 2);
+        assert_eq!(outcome.pruned_count, 1);
+        assert_eq!(outcome.removed.len(), 1);
+        assert_eq!(
+            outcome.removed[0].session_id.to_string(),
+            first.session.session_id.to_string()
+        );
+
+        let remaining: Vec<String> = engine
+            .list_sessions()
+            .expect("list after prune")
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                third.session.session_id.to_string(),
+                second.session.session_id.to_string(),
+            ],
+            "newest-first ordering must be preserved after prune"
+        );
+
+        // Preserved session content (and transcript) is untouched.
+        let reloaded = engine
+            .load_session(&second.session.session_id.to_string())
+            .expect("reload preserved");
+        assert_eq!(reloaded.messages.len(), 1);
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }
