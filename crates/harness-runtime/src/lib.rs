@@ -3,8 +3,8 @@ use harness_core::{
     CommandName, MatchScore, PermissionDenial, Prompt, RuntimeEvent, SessionId, ToolName, TurnIndex,
 };
 use harness_session::{
-    SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionImport,
-    SessionListing, SessionState, SessionStore, TranscriptRecord, TranscriptStore,
+    SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
+    SessionImport, SessionListing, SessionState, SessionStore, TranscriptRecord, TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -380,6 +380,10 @@ impl RuntimeEngine {
 
     pub fn list_sessions(&self) -> Result<Vec<SessionListing>, String> {
         self.store.list().map_err(|err| err.to_string())
+    }
+
+    pub fn find_sessions(&self, query: &str) -> Result<Vec<SessionFindResult>, String> {
+        self.store.find(query).map_err(|err| err.to_string())
     }
 
     pub fn load_session(&self, id: &str) -> Result<SessionState, String> {
@@ -982,6 +986,86 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn find_sessions_returns_newest_first_matches_and_handles_empty_results() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let first = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap first session");
+        let first_id = first.session.session_id.to_string();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = engine
+            .bootstrap(Prompt::new("summary please"))
+            .expect("bootstrap second session");
+        let second_id = second.session.session_id.to_string();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _ = engine
+            .resume(&first_id, Prompt::new("review tools"))
+            .expect("resume first session");
+
+        let results = engine
+            .find_sessions("review")
+            .expect("find sessions by review query");
+        let ids: Vec<String> = results
+            .iter()
+            .map(|result| result.session_id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![first_id.clone()],
+            "find must report only sessions whose transcripts contain the query, newest-first"
+        );
+        let matches: Vec<(usize, String)> = results[0]
+            .matches
+            .iter()
+            .map(|m| (m.turn_index.0, m.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            matches,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "review tools".to_string()),
+            ],
+            "matches must preserve turn_index ordering across resume-appended turns"
+        );
+
+        let summary_results = engine
+            .find_sessions("summary")
+            .expect("find sessions by summary query");
+        let summary_ids: Vec<String> = summary_results
+            .iter()
+            .map(|result| result.session_id.to_string())
+            .collect();
+        assert_eq!(summary_ids, vec![second_id]);
+
+        let empty = engine
+            .find_sessions("definitely-not-present")
+            .expect("find sessions with no matches");
+        assert!(
+            empty.is_empty(),
+            "an unmatched query must succeed cleanly with an empty result set"
+        );
+
+        let empty_query = engine
+            .find_sessions("")
+            .expect("find sessions with empty query");
+        assert!(
+            empty_query.is_empty(),
+            "an empty query must succeed cleanly with an empty result set"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }
 
     #[test]

@@ -213,6 +213,22 @@ pub struct SessionListing {
     pub persisted_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionFindMatch {
+    pub turn_index: TurnIndex,
+    pub prompt: Prompt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionFindResult {
+    pub session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub message_count: usize,
+    pub persisted_path: String,
+    pub matches: Vec<SessionFindMatch>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -356,6 +372,48 @@ impl SessionStore {
         })
     }
 
+    pub fn find(&self, query: &str) -> Result<Vec<SessionFindResult>, RuntimeError> {
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let needle = query.to_ascii_lowercase();
+        let mut results = Vec::new();
+        for listing in self.list()? {
+            let id = listing.session_id.to_string();
+            let transcript = match self.load_transcript(&id) {
+                Ok(record) => record,
+                Err(RuntimeError::SessionNotFound(_)) => continue,
+                Err(other) => return Err(other),
+            };
+
+            let matches: Vec<SessionFindMatch> = transcript
+                .entries
+                .iter()
+                .filter(|entry| entry.prompt.0.to_ascii_lowercase().contains(&needle))
+                .map(|entry| SessionFindMatch {
+                    turn_index: entry.turn_index,
+                    prompt: entry.prompt.clone(),
+                })
+                .collect();
+
+            if matches.is_empty() {
+                continue;
+            }
+
+            results.push(SessionFindResult {
+                session_id: listing.session_id,
+                created_at_ms: listing.created_at_ms,
+                updated_at_ms: listing.updated_at_ms,
+                message_count: listing.message_count,
+                persisted_path: listing.persisted_path,
+                matches,
+            });
+        }
+
+        Ok(results)
+    }
+
     pub fn list(&self) -> Result<Vec<SessionListing>, RuntimeError> {
         if !self.root.exists() {
             return Ok(Vec::new());
@@ -410,8 +468,8 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionComparison, SessionComparisonSide, SessionExport, SessionState, SessionStore,
-        TranscriptEntry, TranscriptRecord, TranscriptStore,
+        SessionComparison, SessionComparisonSide, SessionExport, SessionFindResult, SessionState,
+        SessionStore, TranscriptEntry, TranscriptRecord, TranscriptStore,
     };
     use harness_core::{Prompt, RuntimeError, SessionId, TurnIndex};
     use std::collections::BTreeMap;
@@ -1072,6 +1130,136 @@ mod tests {
         assert!(!root.join(format!("{}.json", session.session_id)).exists());
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn find_returns_newest_first_results_with_matched_turn_indexes_and_prompts() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let older = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_000,
+            messages: vec![Prompt::new("review bash"), Prompt::new("Review summary")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 4,
+                output_tokens: 4,
+            },
+        };
+        let mut older_transcript = TranscriptStore::default();
+        older_transcript.append(Prompt::new("review bash"));
+        older_transcript.append(Prompt::new("Review summary"));
+        let older_record = TranscriptRecord::from_session(&older, &older_transcript);
+
+        let newer = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_100,
+            updated_at_ms: 1_700_000_000_100,
+            messages: vec![Prompt::new("review tools")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+        };
+        let mut newer_transcript = TranscriptStore::default();
+        newer_transcript.append(Prompt::new("review tools"));
+        let newer_record = TranscriptRecord::from_session(&newer, &newer_transcript);
+
+        let unrelated = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_200,
+            updated_at_ms: 1_700_000_000_200,
+            messages: vec![Prompt::new("summary please")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+        };
+        let mut unrelated_transcript = TranscriptStore::default();
+        unrelated_transcript.append(Prompt::new("summary please"));
+        let unrelated_record = TranscriptRecord::from_session(&unrelated, &unrelated_transcript);
+
+        store.save(&older).expect("save older");
+        store.save_transcript(&older_record).expect("save older transcript");
+        store.save(&newer).expect("save newer");
+        store.save_transcript(&newer_record).expect("save newer transcript");
+        store.save(&unrelated).expect("save unrelated");
+        store
+            .save_transcript(&unrelated_record)
+            .expect("save unrelated transcript");
+
+        let results: Vec<SessionFindResult> = store.find("review").expect("find sessions");
+
+        let ids: Vec<String> = results
+            .iter()
+            .map(|result| result.session_id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![newer.session_id.to_string(), older.session_id.to_string()],
+            "find results must use newest-first session ordering"
+        );
+
+        let newer_result = &results[0];
+        assert_eq!(newer_result.message_count, 1);
+        assert_eq!(newer_result.matches.len(), 1);
+        assert_eq!(newer_result.matches[0].turn_index.0, 0);
+        assert_eq!(newer_result.matches[0].prompt.0, "review tools");
+
+        let older_result = &results[1];
+        assert_eq!(older_result.message_count, 2);
+        let older_matches: Vec<(usize, String)> = older_result
+            .matches
+            .iter()
+            .map(|m| (m.turn_index.0, m.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            older_matches,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "Review summary".to_string()),
+            ],
+            "matches must preserve turn_index order and capture case-insensitive matches"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn find_returns_empty_results_for_unmatched_query_and_for_empty_query() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+        };
+        let mut transcript = TranscriptStore::default();
+        transcript.append(Prompt::new("review bash"));
+        let record = TranscriptRecord::from_session(&session, &transcript);
+        store.save(&session).expect("save session");
+        store.save_transcript(&record).expect("save transcript");
+
+        let no_match = store.find("nothing-here").expect("find with no matches");
+        assert!(
+            no_match.is_empty(),
+            "unmatched query must return an empty result set"
+        );
+
+        let empty_query = store.find("").expect("find with empty query");
+        assert!(
+            empty_query.is_empty(),
+            "empty query must return an empty result set without crashing"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
     }
 
     #[test]

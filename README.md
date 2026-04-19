@@ -49,7 +49,7 @@ The first meaningful milestone is:
 - tool and command registries
 - deterministic routing
 - runtime turn processor with structured events
-- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, session export, session comparison, session deletion, and session import
+- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, session export, session comparison, session deletion, session import, and session search
 
 See:
 
@@ -710,6 +710,44 @@ cargo run -q -p harness-cli -- session-import ./bundle.json
 }
 ```
 
+### `session-find <query>`
+
+Search persisted local sessions by transcript prompt text without mutating any session state. The query is matched case-insensitively as a substring against each persisted transcript entry. The output is a deterministic JSON array of result objects, one per session that contains at least one matching transcript entry, ordered using the same newest-first session ordering as `sessions` (most recently updated session first, then by created-at, then by session id). Each result identifies the matched `session_id` and includes the session's recency metadata (`created_at_ms`, `updated_at_ms`), `message_count`, `persisted_path`, and a `matches` array. Each entry in `matches` records the matched `turn_index` plus the persisted `prompt` text, so the result is useful from the terminal without a follow-up `transcript-show` call. An empty query and a query with no matches both succeed cleanly with an empty array (`[]`) instead of erroring.
+
+```bash
+cargo run -q -p harness-cli -- session-find review
+```
+
+```json
+[
+  {
+    "session_id": "<session-id>",
+    "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
+    "message_count": 1,
+    "persisted_path": ".sessions/<session-id>.json",
+    "matches": [
+      {
+        "turn_index": 0,
+        "prompt": "review bash"
+      }
+    ]
+  }
+]
+```
+
+### `session-find <unmatched-query>`
+
+An empty query, or a query that matches no persisted transcript entries, returns an empty JSON array instead of erroring. The example below uses a query that no persisted transcript contains, so the output is the deterministic empty result `[]`.
+
+```bash
+cargo run -q -p harness-cli -- session-find definitely-not-present
+```
+
+```json
+[]
+```
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -741,6 +779,9 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::import_bundle` behavior: validates that the bundle's `exported_session_id`, nested `session.session_id`, and nested `transcript.session_id` all agree, rejects bundles whose transcript `turn_index` values are non-monotonic, refuses to overwrite an existing persisted session id, and on success writes both the session JSON and its sibling transcript JSON preserving the imported session id, recency/activity metadata, and turn ordering exactly as carried in the bundle
 - `harness-runtime` `import_session` behavior: reads a persisted bundle from a user-supplied path, round-trips a `session-export` bundle into a fresh store, reports the imported session id plus the written session and transcript paths, and fails cleanly when the bundle path is missing or the target session id already exists locally
 - README-backed CLI coverage for `session-import <bundle-path>` confirming the output identifies the imported session id and the written session and transcript paths, and that a duplicate import against the same store fails cleanly without touching the already-imported session
+- `harness-session` `SessionStore::find` behavior: matches persisted transcript prompt text case-insensitively, orders results using the existing newest-first session ordering, preserves `turn_index` ordering inside each result's `matches` array, and returns an empty result set for both an empty query and a query with no matches without mutating any persisted session state
+- `harness-runtime` `find_sessions` behavior: surfaces matches across bootstrap and resume-appended turns for an explicit query, scopes to sessions whose transcripts contain the query, and treats both unmatched queries and the empty query as a clean empty result set
+- README-backed CLI coverage for `session-find <query>` confirming a positive search reports the matched session id with `turn_index`-ordered `matches`, and that a query with no matches produces a deterministic empty JSON array
 
 Validation commands:
 
@@ -801,3 +842,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI session comparison for persisted sessions (`session-compare <left-id> <right-id>` with `latest` accepted on either side) in a deterministic JSON shape that identifies both compared session ids and reports signed deltas for recency metadata and transcript/turn counts
 - [x] CLI session deletion for persisted sessions (`session-delete <id>` and `session-delete latest`) that removes both the session JSON and its sibling transcript JSON in one call, with deterministic JSON output identifying the deleted session id plus the removed paths, and a clean failure when the target session does not exist
 - [x] CLI session import for persisted session bundles (`session-import <bundle-path>`) that accepts the deterministic `{ exported_session_id, session, transcript }` shape emitted by `session-export`, recreates both persisted artifacts preserving the imported session id, recency/activity metadata, and transcript `turn_index` ordering, and fails cleanly without overwriting unrelated persisted sessions when the bundle is invalid or the target session id already exists locally
+- [x] CLI session search for persisted transcripts (`session-find <query>`) that case-insensitively matches transcript prompt text without mutating session state, returns a deterministic JSON array ordered using the existing newest-first session ordering, identifies each matched `session_id` with recency/activity metadata plus a `matches` array of `{ turn_index, prompt }` so results are useful from the terminal, and treats both empty queries and queries with no matches as a clean empty array instead of an error
