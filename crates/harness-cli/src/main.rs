@@ -26,6 +26,7 @@ enum CliCommand {
     SessionDelete { id: String },
     SessionImport { path: String },
     SessionFind { query: String },
+    SessionFork { id: String, prompt: String },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -95,6 +96,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("search persisted sessions");
             serde_json::to_string_pretty(&results).expect("serialize session find results")
         }
+        CliCommand::SessionFork { id, prompt } => {
+            let fork = engine
+                .fork_session(&id, Prompt::new(prompt))
+                .expect("fork persisted session");
+            serde_json::to_string_pretty(&fork).expect("serialize session fork")
+        }
     }
 }
 
@@ -111,8 +118,8 @@ mod tests {
     use harness_commands::CommandRegistry;
     use harness_runtime::RuntimeEngine;
     use harness_session::{
-        SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionImport,
-        SessionState, SessionStore, TranscriptRecord,
+        SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
+        SessionImport, SessionState, SessionStore, TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -242,6 +249,19 @@ mod tests {
 
     fn normalize_session_output(output: &str, session_id: &str) -> String {
         normalize_timestamps(&output.replace(session_id, "<session-id>"))
+    }
+
+    fn normalize_fork_output(
+        output: &str,
+        source_session_id: &str,
+        forked_session_id: &str,
+        root: &Path,
+    ) -> String {
+        let replaced = output
+            .replace(root.to_string_lossy().as_ref(), ".sessions")
+            .replace(forked_session_id, "<forked-session-id>")
+            .replace(source_session_id, "<source-session-id>");
+        normalize_timestamps(&replaced)
     }
 
     #[test]
@@ -990,6 +1010,137 @@ mod tests {
         assert_eq!(
             find_output,
             readme_output_block("session-find <unmatched-query>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_fork_matches_readme_example_and_creates_fresh_session_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let source_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let fork_output = render_command(
+            &engine,
+            CliCommand::SessionFork {
+                id: source_id.clone(),
+                prompt: "try again".to_string(),
+            },
+        );
+
+        let fork: SessionFork =
+            serde_json::from_str(&fork_output).expect("parse session-fork output");
+        assert_eq!(
+            fork.source_session_id.to_string(),
+            source_id,
+            "source_session_id must match the targeted source"
+        );
+        assert_ne!(
+            fork.forked_session_id.to_string(),
+            source_id,
+            "forked session id must differ from source"
+        );
+        assert_eq!(fork.appended_turn_index.0, 1);
+        assert_eq!(
+            fork.session_path,
+            root.join(format!("{}.json", fork.forked_session_id))
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            fork.transcript_path,
+            root.join(format!("{}.transcript.json", fork.forked_session_id))
+                .display()
+                .to_string()
+        );
+        assert!(Path::new(&fork.session_path).exists());
+        assert!(Path::new(&fork.transcript_path).exists());
+
+        let forked: SessionState = engine
+            .load_session(&fork.forked_session_id.to_string())
+            .expect("reload forked session");
+        let forked_messages: Vec<String> = forked
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            forked_messages,
+            vec!["review bash".to_string(), "try again".to_string()],
+            "forked session must carry source messages then append the new prompt"
+        );
+
+        let source: SessionState = engine
+            .load_session(&source_id)
+            .expect("source session must still load");
+        let source_messages: Vec<String> = source
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            source_messages,
+            vec!["review bash".to_string()],
+            "source session must not be mutated by fork"
+        );
+
+        let forked_id = fork.forked_session_id.to_string();
+        assert_eq!(
+            normalize_fork_output(&fork_output, &source_id, &forked_id, &root),
+            readme_output_block("session-fork <source-session-id> \"try again\"", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_fork_latest_matches_readme_example_and_targets_most_recent() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let source_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let latest_output = render_command(
+            &engine,
+            CliCommand::SessionFork {
+                id: "latest".to_string(),
+                prompt: "try again".to_string(),
+            },
+        );
+
+        let fork: SessionFork =
+            serde_json::from_str(&latest_output).expect("parse session-fork latest output");
+        assert_eq!(fork.source_session_id.to_string(), source_id);
+        assert_ne!(fork.forked_session_id.to_string(), source_id);
+
+        let forked_id = fork.forked_session_id.to_string();
+        assert_eq!(
+            normalize_fork_output(&latest_output, &source_id, &forked_id, &root),
+            readme_output_block("session-fork latest \"try again\"", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");

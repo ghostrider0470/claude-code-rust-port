@@ -49,7 +49,7 @@ The first meaningful milestone is:
 - tool and command registries
 - deterministic routing
 - runtime turn processor with structured events
-- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, session export, session comparison, session deletion, session import, and session search
+- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, session export, session comparison, session deletion, session import, session search, and session fork
 
 See:
 
@@ -748,6 +748,42 @@ cargo run -q -p harness-cli -- session-find definitely-not-present
 []
 ```
 
+### `session-fork <source-session-id> "try again"`
+
+Fork a persisted session so a new line of work can diverge from an existing turn without mutating the source. The fork creates a fresh `session_id`, carries forward the source session's messages and transcript in order, and appends the new prompt as the first divergent turn. Both persisted artifacts are written for the forked session — the session JSON at `.sessions/<forked-session-id>.json` and the sibling transcript JSON at `.sessions/<forked-session-id>.transcript.json` — while the source session JSON and transcript are left exactly as they were. The output uses a deterministic shape: `{ source_session_id, forked_session_id, appended_turn_index, session_path, transcript_path }`. `source_session_id` confirms which session the fork diverged from, `forked_session_id` is the new persisted id, and `appended_turn_index` marks where the new prompt landed in the forked transcript (equal to the source's message count).
+
+```bash
+cargo run -q -p harness-cli -- session-fork <source-session-id> "try again"
+```
+
+```json
+{
+  "source_session_id": "<source-session-id>",
+  "forked_session_id": "<forked-session-id>",
+  "appended_turn_index": 1,
+  "session_path": ".sessions/<forked-session-id>.json",
+  "transcript_path": ".sessions/<forked-session-id>.transcript.json"
+}
+```
+
+### `session-fork latest "try again"`
+
+`latest` resolves to the most recently active persisted session, mirroring how `session-show latest`, `transcript-show latest`, `session-export latest`, `session-compare latest latest`, and `session-delete latest` resolve their targets. This is the ergonomic way to branch off the session you just worked on without having to copy its id by hand.
+
+```bash
+cargo run -q -p harness-cli -- session-fork latest "try again"
+```
+
+```json
+{
+  "source_session_id": "<source-session-id>",
+  "forked_session_id": "<forked-session-id>",
+  "appended_turn_index": 1,
+  "session_path": ".sessions/<forked-session-id>.json",
+  "transcript_path": ".sessions/<forked-session-id>.transcript.json"
+}
+```
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -782,6 +818,9 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::find` behavior: matches persisted transcript prompt text case-insensitively, orders results using the existing newest-first session ordering, preserves `turn_index` ordering inside each result's `matches` array, and returns an empty result set for both an empty query and a query with no matches without mutating any persisted session state
 - `harness-runtime` `find_sessions` behavior: surfaces matches across bootstrap and resume-appended turns for an explicit query, scopes to sessions whose transcripts contain the query, and treats both unmatched queries and the empty query as a clean empty result set
 - README-backed CLI coverage for `session-find <query>` confirming a positive search reports the matched session id with `turn_index`-ordered `matches`, and that a query with no matches produces a deterministic empty JSON array
+- `harness-session` `SessionStore::fork` behavior: creates a fresh `session_id` rather than mutating the source, copies source messages and transcript entries forward in turn-index order, appends the new prompt as the first divergent turn, persists both the forked session JSON and its sibling transcript JSON, leaves the source session JSON and transcript exactly as they were, and reports `SessionNotFound` cleanly when the source id does not exist
+- `harness-runtime` `fork_session` behavior: resolves the `latest` selector to the most recently active persisted session, delegates to the store to write the forked session plus transcript, and fails cleanly for a missing source id without leaving partial persisted artifacts behind
+- README-backed CLI coverage for `session-fork <source-session-id> "try again"` and `session-fork latest "try again"` confirming the output identifies both the source and forked session ids, exposes the `appended_turn_index`, and reports the written session and transcript paths while the source session and transcript remain unchanged
 
 Validation commands:
 
@@ -843,3 +882,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI session deletion for persisted sessions (`session-delete <id>` and `session-delete latest`) that removes both the session JSON and its sibling transcript JSON in one call, with deterministic JSON output identifying the deleted session id plus the removed paths, and a clean failure when the target session does not exist
 - [x] CLI session import for persisted session bundles (`session-import <bundle-path>`) that accepts the deterministic `{ exported_session_id, session, transcript }` shape emitted by `session-export`, recreates both persisted artifacts preserving the imported session id, recency/activity metadata, and transcript `turn_index` ordering, and fails cleanly without overwriting unrelated persisted sessions when the bundle is invalid or the target session id already exists locally
 - [x] CLI session search for persisted transcripts (`session-find <query>`) that case-insensitively matches transcript prompt text without mutating session state, returns a deterministic JSON array ordered using the existing newest-first session ordering, identifies each matched `session_id` with recency/activity metadata plus a `matches` array of `{ turn_index, prompt }` so results are useful from the terminal, and treats both empty queries and queries with no matches as a clean empty array instead of an error
+- [x] CLI session fork for persisted sessions (`session-fork <id> <prompt>` and `session-fork latest <prompt>`) that creates a fresh persisted session id rather than mutating the source, carries the source session messages and transcript forward in turn-index order, appends the new prompt as the first divergent turn, writes both forked persisted artifacts (`.sessions/<forked-session-id>.json` and its sibling transcript JSON), and emits a deterministic `{ source_session_id, forked_session_id, appended_turn_index, session_path, transcript_path }` shape while leaving the source session and transcript unchanged

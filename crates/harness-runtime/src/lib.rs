@@ -4,7 +4,8 @@ use harness_core::{
 };
 use harness_session::{
     SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
-    SessionImport, SessionListing, SessionState, SessionStore, TranscriptRecord, TranscriptStore,
+    SessionFork, SessionImport, SessionListing, SessionState, SessionStore, TranscriptRecord,
+    TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -428,6 +429,13 @@ impl RuntimeEngine {
         })?;
         self.store
             .import_bundle(&bundle)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn fork_session(&self, target: &str, prompt: Prompt) -> Result<SessionFork, String> {
+        let source = self.load_session(target)?;
+        self.store
+            .fork(&source.session_id.to_string(), prompt)
             .map_err(|err| err.to_string())
     }
 
@@ -1066,6 +1074,154 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn fork_session_creates_fresh_session_id_preserves_source_and_supports_latest() {
+        use harness_core::{Prompt, TurnIndex};
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let bootstrap = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap session");
+        let source_id = bootstrap.session.session_id.to_string();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _ = engine
+            .resume(&source_id, Prompt::new("summary please"))
+            .expect("resume source session");
+
+        let fork = engine
+            .fork_session(&source_id, Prompt::new("try again"))
+            .expect("fork source session by id");
+
+        assert_eq!(fork.source_session_id.to_string(), source_id);
+        assert_ne!(
+            fork.forked_session_id.to_string(),
+            source_id,
+            "forked session id must differ from source"
+        );
+        assert_eq!(fork.appended_turn_index, TurnIndex(2));
+        assert!(
+            std::path::Path::new(&fork.session_path).exists(),
+            "forked session file must be written"
+        );
+        assert!(
+            std::path::Path::new(&fork.transcript_path).exists(),
+            "forked transcript file must be written"
+        );
+
+        let forked_session = engine
+            .load_session(&fork.forked_session_id.to_string())
+            .expect("load forked session");
+        let forked_messages: Vec<String> = forked_session
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            forked_messages,
+            vec![
+                "review bash".to_string(),
+                "summary please".to_string(),
+                "try again".to_string(),
+            ]
+        );
+
+        let forked_transcript = engine
+            .load_transcript(&fork.forked_session_id.to_string())
+            .expect("load forked transcript");
+        let ordered: Vec<(usize, String)> = forked_transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "summary please".to_string()),
+                (2, "try again".to_string()),
+            ]
+        );
+
+        let source_session = engine
+            .load_session(&source_id)
+            .expect("source session must still load");
+        let source_messages: Vec<String> = source_session
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            source_messages,
+            vec!["review bash".to_string(), "summary please".to_string()],
+            "source session must not be mutated by the fork"
+        );
+        let source_transcript = engine
+            .load_transcript(&source_id)
+            .expect("source transcript must still load");
+        let source_ordered: Vec<(usize, String)> = source_transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            source_ordered,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "summary please".to_string()),
+            ],
+            "source transcript must not be mutated by the fork"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let latest_fork = engine
+            .fork_session("latest", Prompt::new("via latest"))
+            .expect("fork via latest selector");
+        assert_eq!(
+            latest_fork.source_session_id.to_string(),
+            fork.forked_session_id.to_string(),
+            "`latest` must resolve to the most recently active persisted session (the prior fork)"
+        );
+        assert_ne!(
+            latest_fork.forked_session_id, fork.forked_session_id,
+            "latest-fork must produce a fresh session id"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn fork_session_reports_missing_source_cleanly() {
+        use harness_core::{Prompt, SessionId};
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let missing = SessionId::new().to_string();
+        let result = engine.fork_session(&missing, Prompt::new("will not land"));
+        assert!(result.is_err(), "missing source id must fail");
+        assert!(
+            engine
+                .list_sessions()
+                .expect("list sessions after failed fork")
+                .is_empty(),
+            "no persisted sessions should exist after a failed fork"
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
