@@ -390,6 +390,11 @@ pub struct SessionSelectorCheck {
 /// rely on the documented contract.
 pub const DEFAULT_TRANSCRIPT_TAIL_COUNT: usize = 10;
 
+/// Default number of transcript entries returned by `range_transcript` when the
+/// caller does not specify an explicit `--count`. Kept stable so CLI scripts
+/// can rely on the documented contract.
+pub const DEFAULT_TRANSCRIPT_RANGE_COUNT: usize = 10;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTranscriptTail {
     pub selector: String,
@@ -411,6 +416,19 @@ pub struct SessionTranscriptFind {
     pub total_entries: usize,
     pub match_count: usize,
     pub matches: Vec<SessionFindMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptRange {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub start_turn_index: usize,
+    pub requested_count: usize,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub returned_entries: usize,
+    pub entries: Vec<TranscriptEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -569,6 +587,44 @@ impl SessionStore {
             total_entries: total,
             match_count: matches.len(),
             matches,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// bounded forward slice of the matching persisted transcript beginning at
+    /// `turn_index == start` and containing at most `count` entries in their
+    /// original `turn_index` order. The persisted transcript is not mutated.
+    /// A `start` past the end of the transcript (including on an empty
+    /// transcript) returns a clean empty `entries` array rather than erroring,
+    /// and a `count` larger than the number of remaining entries simply
+    /// returns the available tail. Preserves existing selector failure
+    /// semantics unchanged (`SessionNotFound` / `AmbiguousLabel` /
+    /// `MalformedSelector`).
+    pub fn range_transcript(
+        &self,
+        selector: &str,
+        start: usize,
+        count: usize,
+    ) -> Result<SessionTranscriptRange, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total = transcript.entries.len();
+        let entries = if start >= total {
+            Vec::new()
+        } else {
+            let end = start.saturating_add(count).min(total);
+            transcript.entries[start..end].to_vec()
+        };
+        Ok(SessionTranscriptRange {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            start_turn_index: start,
+            requested_count: count,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries: total,
+            returned_entries: entries.len(),
+            entries,
         })
     }
 
