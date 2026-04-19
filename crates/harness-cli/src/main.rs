@@ -27,6 +27,7 @@ enum CliCommand {
     SessionImport { path: String },
     SessionFind { query: String },
     SessionFork { id: String, prompt: String },
+    SessionRename { id: String, label: String },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -102,6 +103,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("fork persisted session");
             serde_json::to_string_pretty(&fork).expect("serialize session fork")
         }
+        CliCommand::SessionRename { id, label } => {
+            let renamed = engine
+                .rename_session(&id, &label)
+                .expect("rename persisted session");
+            serde_json::to_string_pretty(&renamed).expect("serialize session rename")
+        }
     }
 }
 
@@ -119,7 +126,7 @@ mod tests {
     use harness_runtime::RuntimeEngine;
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
-        SessionImport, SessionState, SessionStore, TranscriptRecord,
+        SessionImport, SessionRename, SessionState, SessionStore, TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -1141,6 +1148,202 @@ mod tests {
         assert_eq!(
             normalize_fork_output(&latest_output, &source_id, &forked_id, &root),
             readme_output_block("session-fork latest \"try again\"", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_rename_matches_readme_example_and_persists_label_without_mutating_transcript() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let transcript_before = engine
+            .load_transcript(&session_id)
+            .expect("load transcript before rename");
+        let session_before = engine
+            .load_session(&session_id)
+            .expect("load session before rename");
+
+        let rename_output = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let renamed: SessionRename =
+            serde_json::from_str(&rename_output).expect("parse session-rename output");
+        assert_eq!(renamed.renamed_session_id.to_string(), session_id);
+        assert_eq!(renamed.applied_label, "runtime-review");
+
+        let reloaded = engine
+            .load_session(&session_id)
+            .expect("reload session after rename");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+        assert_eq!(
+            reloaded.updated_at_ms, session_before.updated_at_ms,
+            "rename must not bump activity metadata"
+        );
+        assert_eq!(reloaded.messages, session_before.messages);
+
+        let transcript_after = engine
+            .load_transcript(&session_id)
+            .expect("reload transcript after rename");
+        assert_eq!(
+            transcript_after, transcript_before,
+            "rename must not mutate transcript entries or ordering"
+        );
+
+        assert_eq!(
+            normalize_session_output(&rename_output, &session_id),
+            readme_output_block("session-rename <id> <label>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_rename_latest_matches_readme_example_and_targets_most_recent() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let latest_output = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: "latest".to_string(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let renamed: SessionRename =
+            serde_json::from_str(&latest_output).expect("parse session-rename latest output");
+        assert_eq!(renamed.renamed_session_id.to_string(), session_id);
+        assert_eq!(renamed.applied_label, "runtime-review");
+
+        assert_eq!(
+            normalize_session_output(&latest_output, &session_id),
+            readme_output_block("session-rename latest <label>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_rename_rejects_invalid_label_and_unknown_id_without_touching_other_sessions() {
+        use harness_core::SessionId;
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        for invalid in ["", "   ", "\t\n"] {
+            let result = engine.rename_session(&session_id, invalid);
+            assert!(result.is_err(), "empty/whitespace label must fail");
+        }
+
+        let missing = SessionId::new().to_string();
+        assert!(
+            engine.rename_session(&missing, "anything").is_err(),
+            "unknown session id must fail"
+        );
+
+        let reloaded = engine
+            .load_session(&session_id)
+            .expect("reload session after failed renames");
+        assert!(
+            reloaded.label.is_none(),
+            "rejected renames must not persist a label"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_rename_preserves_unlabeled_json_shape_for_session_show() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let unlabeled_show = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                id: session_id.clone(),
+            },
+        );
+        assert!(
+            !unlabeled_show.contains("\"label\""),
+            "unlabeled session-show output must not emit the label field: {unlabeled_show}"
+        );
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let labeled_show = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                id: session_id.clone(),
+            },
+        );
+        assert!(
+            labeled_show.contains("\"label\": \"runtime-review\""),
+            "labeled session-show output must expose the label field: {labeled_show}"
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
