@@ -4,9 +4,9 @@ use harness_core::{
 };
 use harness_session::{
     SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
-    SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionPin, SessionPrune,
-    SessionRename, SessionRetag, SessionState, SessionStore, SessionUnlabel, SessionUnpin,
-    TranscriptRecord, TranscriptStore,
+    SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionPin, SessionPinEntry,
+    SessionPrune, SessionRename, SessionRetag, SessionState, SessionStore, SessionUnlabel,
+    SessionUnpin, TranscriptRecord, TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -390,6 +390,10 @@ impl RuntimeEngine {
 
     pub fn list_session_labels(&self) -> Result<Vec<SessionLabelEntry>, String> {
         self.store.list_labels().map_err(|err| err.to_string())
+    }
+
+    pub fn list_session_pins(&self) -> Result<Vec<SessionPinEntry>, String> {
+        self.store.list_pins().map_err(|err| err.to_string())
     }
 
     /// Resolve a CLI selector (`latest`, `label:<name>`, or raw id) to the
@@ -1612,6 +1616,85 @@ mod tests {
             first.session.session_id.to_string(),
             "older duplicate label must appear second"
         );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn list_session_pins_orders_newest_first_omits_unpinned_and_surfaces_label() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        // Empty store must return a clean empty array without erroring.
+        let empty = engine.list_session_pins().expect("list pins empty");
+        assert!(empty.is_empty(), "empty store must yield empty pin listing");
+
+        // Three bootstraps in time order. Only the older and the newest get
+        // pinned; the middle one stays unpinned and must be omitted.
+        let older = engine.bootstrap(Prompt::new("alpha")).expect("bootstrap alpha");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let middle = engine.bootstrap(Prompt::new("beta")).expect("bootstrap beta");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newest = engine
+            .bootstrap(Prompt::new("gamma"))
+            .expect("bootstrap gamma");
+
+        // Label only the older pinned session so we can verify optional
+        // `label` surfacing alongside an unlabeled pinned session.
+        engine
+            .rename_session(&older.session.session_id.to_string(), "runtime-review")
+            .expect("label older");
+        engine
+            .pin_session(&older.session.session_id.to_string())
+            .expect("pin older");
+        engine
+            .pin_session(&newest.session.session_id.to_string())
+            .expect("pin newest");
+
+        let entries = engine.list_session_pins().expect("list pins");
+
+        let ids: Vec<String> = entries
+            .iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                newest.session.session_id.to_string(),
+                older.session.session_id.to_string(),
+            ],
+            "pins must be listed in newest-first order and the unpinned session omitted"
+        );
+        assert!(
+            entries.iter().all(|entry| entry.pinned),
+            "every surfaced pin row must report pinned: true"
+        );
+        assert_eq!(
+            entries[0].label, None,
+            "unlabeled pinned session must not surface a label"
+        );
+        assert_eq!(
+            entries[1].label.as_deref(),
+            Some("runtime-review"),
+            "labeled pinned session must surface the label"
+        );
+
+        // Unpinned session must not appear and must remain unmutated.
+        assert!(
+            !ids.contains(&middle.session.session_id.to_string()),
+            "unpinned middle session must be omitted"
+        );
+        let reloaded_middle = engine
+            .load_session(&middle.session.session_id.to_string())
+            .expect("reload middle");
+        assert!(!reloaded_middle.pinned, "listing must not mutate persisted pinned state");
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }

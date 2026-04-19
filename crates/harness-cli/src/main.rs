@@ -31,6 +31,7 @@ enum CliCommand {
     SessionUnlabel { id: String },
     SessionRetag { id: String, label: String },
     SessionLabels,
+    SessionPins,
     SessionPrune {
         #[arg(long)]
         keep: usize,
@@ -136,6 +137,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("list persisted session labels");
             serde_json::to_string_pretty(&labels).expect("serialize session labels")
         }
+        CliCommand::SessionPins => {
+            let pins = engine
+                .list_session_pins()
+                .expect("list persisted session pins");
+            serde_json::to_string_pretty(&pins).expect("serialize session pins")
+        }
         CliCommand::SessionPrune { keep } => {
             let pruned = engine
                 .prune_sessions(keep)
@@ -167,8 +174,8 @@ mod tests {
     use harness_runtime::RuntimeEngine;
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
-        SessionImport, SessionLabelEntry, SessionPin, SessionPrune, SessionRename, SessionRetag,
-        SessionState, SessionStore, SessionUnlabel, SessionUnpin, TranscriptRecord,
+        SessionImport, SessionLabelEntry, SessionPin, SessionPinEntry, SessionPrune, SessionRename,
+        SessionRetag, SessionState, SessionStore, SessionUnlabel, SessionUnpin, TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -1725,6 +1732,171 @@ mod tests {
             output,
             readme_output_block("session-labels <empty-store>", "json"),
             "unlabeled-only store must also emit the README-backed empty JSON array"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pins_orders_newest_first_omits_unpinned_and_surfaces_optional_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Three persisted sessions. Only the older and newest get pinned, and
+        // only the older carries a label so the listing proves:
+        //   - newest-first ordering across pinned rows
+        //   - omission of the unpinned middle session
+        //   - optional `label` surfacing (unlabeled pinned row omits `label`)
+        let older_out = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let older_id = serde_json::from_str::<serde_json::Value>(&older_out)
+            .expect("parse older bootstrap")["session"]["session_id"]
+            .as_str()
+            .expect("older session id")
+            .to_string();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let middle_out = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "unpinned middle".to_string(),
+            },
+        );
+        let middle_id = serde_json::from_str::<serde_json::Value>(&middle_out)
+            .expect("parse middle bootstrap")["session"]["session_id"]
+            .as_str()
+            .expect("middle session id")
+            .to_string();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let newest_out = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "summary please".to_string(),
+            },
+        );
+        let newest_id = serde_json::from_str::<serde_json::Value>(&newest_out)
+            .expect("parse newest bootstrap")["session"]["session_id"]
+            .as_str()
+            .expect("newest session id")
+            .to_string();
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: older_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionPin {
+                id: older_id.clone(),
+            },
+        );
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionPin {
+                id: newest_id.clone(),
+            },
+        );
+
+        let pins_output = render_command(&engine, CliCommand::SessionPins);
+        let entries: Vec<SessionPinEntry> =
+            serde_json::from_str(&pins_output).expect("parse session-pins output");
+        assert_eq!(entries.len(), 2, "only pinned sessions must appear");
+        assert_eq!(
+            entries[0].session_id.to_string(),
+            newest_id,
+            "newest pinned session must come first"
+        );
+        assert!(entries[0].pinned, "pinned row must report pinned: true");
+        assert_eq!(
+            entries[0].label, None,
+            "unlabeled pinned session must omit `label`"
+        );
+        assert_eq!(entries[1].session_id.to_string(), older_id);
+        assert!(entries[1].pinned);
+        assert_eq!(
+            entries[1].label.as_deref(),
+            Some("runtime-review"),
+            "labeled pinned session must surface `label`"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.session_id.to_string() == middle_id),
+            "unpinned session must be omitted"
+        );
+
+        // The README example shows a single labeled pinned session, so re-run
+        // against a fresh store to compare deterministic output.
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+        let readme_root = temp_session_root();
+        let readme_engine = temp_engine(&readme_root);
+        let bootstrap_output = render_command(
+            &readme_engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let session_id = serde_json::from_str::<serde_json::Value>(&bootstrap_output)
+            .expect("parse bootstrap")["session"]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        let _ = render_command(
+            &readme_engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+        let _ = render_command(
+            &readme_engine,
+            CliCommand::SessionPin {
+                id: session_id.clone(),
+            },
+        );
+        let pins_output = render_command(&readme_engine, CliCommand::SessionPins);
+
+        assert_eq!(
+            normalize_bootstrap_example(&pins_output, &session_id, &readme_root),
+            readme_output_block("session-pins", "json")
+        );
+
+        fs::remove_dir_all(&readme_root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pins_empty_store_matches_readme_empty_example() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Truly empty store: no persisted sessions at all.
+        let output = render_command(&engine, CliCommand::SessionPins);
+        assert_eq!(
+            output,
+            readme_output_block("session-pins <empty-store>", "json"),
+            "empty store must emit the README-backed empty JSON array"
+        );
+
+        // Store with only unpinned persisted sessions must behave identically.
+        let _ = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "no pin".to_string(),
+            },
+        );
+        let output = render_command(&engine, CliCommand::SessionPins);
+        assert_eq!(
+            output,
+            readme_output_block("session-pins <empty-store>", "json"),
+            "unpinned-only store must also emit the README-backed empty JSON array"
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
