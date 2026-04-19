@@ -1350,6 +1350,142 @@ mod tests {
     }
 
     #[test]
+    fn label_selector_targets_persisted_session_via_session_show_and_emits_resolved_id_in_json() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        // Raw-id targeting must keep working unchanged after the rename.
+        let by_raw_id = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                id: session_id.clone(),
+            },
+        );
+        let raw_state: SessionState =
+            serde_json::from_str(&by_raw_id).expect("parse raw-id session-show");
+        assert_eq!(raw_state.session_id.to_string(), session_id);
+
+        // Label selector returns the same persisted session and the JSON
+        // identifies the actual resolved session_id, not the label string.
+        let by_label = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                id: "label:runtime-review".to_string(),
+            },
+        );
+        let labeled_state: SessionState =
+            serde_json::from_str(&by_label).expect("parse label session-show");
+        assert_eq!(labeled_state.session_id.to_string(), session_id);
+        assert!(
+            !by_label.contains("label:runtime-review"),
+            "JSON output must not echo the selector string in place of the resolved id: {by_label}"
+        );
+        assert!(
+            by_label.contains(&session_id),
+            "JSON output must surface the resolved session_id: {by_label}"
+        );
+
+        // session-compare also accepts the label selector on either side and
+        // resolves to real session_ids in the bundle.
+        let second_bootstrap = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "summary please".to_string(),
+            },
+        );
+        let second_json: serde_json::Value =
+            serde_json::from_str(&second_bootstrap).expect("parse second bootstrap");
+        let second_id = second_json["session"]["session_id"]
+            .as_str()
+            .expect("second session id")
+            .to_string();
+
+        let compare_output = render_command(
+            &engine,
+            CliCommand::SessionCompare {
+                left: "label:runtime-review".to_string(),
+                right: "latest".to_string(),
+            },
+        );
+        let comparison: SessionComparison =
+            serde_json::from_str(&compare_output).expect("parse compare output");
+        assert_eq!(comparison.left_session_id.to_string(), session_id);
+        assert_eq!(comparison.right_session_id.to_string(), second_id);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn label_selector_unknown_and_ambiguous_inputs_fail_cleanly_via_runtime_layer() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Unknown label surfaces from the engine before any persisted state is
+        // touched. We test via the engine API to assert on the error string
+        // shape — render_command panics on error by design.
+        let unknown = engine.load_session("label:missing");
+        assert!(unknown.is_err(), "unknown label must fail cleanly");
+        assert!(
+            unknown.unwrap_err().contains("label:missing"),
+            "unknown-label error must echo the typed selector"
+        );
+
+        // Two persisted sessions sharing a label is ambiguous.
+        let one = engine
+            .bootstrap(Prompt::new("alpha"))
+            .expect("bootstrap one");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let two = engine
+            .bootstrap(Prompt::new("beta"))
+            .expect("bootstrap two");
+        engine
+            .rename_session(&one.session.session_id.to_string(), "dup")
+            .expect("label one");
+        engine
+            .rename_session(&two.session.session_id.to_string(), "dup")
+            .expect("label two");
+        let ambiguous = engine.load_session("label:dup");
+        assert!(ambiguous.is_err(), "ambiguous label must fail cleanly");
+        assert!(
+            ambiguous.unwrap_err().contains("ambiguous session label"),
+            "ambiguous-label error must mention ambiguity"
+        );
+
+        // `label:` with no name is malformed.
+        let malformed = engine.load_session("label:");
+        assert!(malformed.is_err(), "malformed selector must fail cleanly");
+        assert!(
+            malformed.unwrap_err().contains("malformed session selector"),
+            "malformed-selector error must mention malformed selector"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
     fn session_show_latest_matches_readme_example() {
         let root = temp_session_root();
         let engine = temp_engine(&root);

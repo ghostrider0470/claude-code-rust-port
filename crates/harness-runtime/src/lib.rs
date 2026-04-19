@@ -387,20 +387,25 @@ impl RuntimeEngine {
         self.store.find(query).map_err(|err| err.to_string())
     }
 
-    pub fn load_session(&self, id: &str) -> Result<SessionState, String> {
-        if id == "latest" {
-            return self.store.latest().map_err(|err| err.to_string());
-        }
+    /// Resolve a CLI selector (`latest`, `label:<name>`, or raw id) to the
+    /// concrete persisted `session_id` string. All single-session command
+    /// paths funnel through this so label support is uniform.
+    pub fn resolve_selector(&self, selector: &str) -> Result<String, String> {
+        self.store
+            .resolve_selector(selector)
+            .map_err(|err| err.to_string())
+    }
 
-        self.store.load(id).map_err(|err| err.to_string())
+    pub fn load_session(&self, id: &str) -> Result<SessionState, String> {
+        let resolved = self.resolve_selector(id)?;
+        self.store.load(&resolved).map_err(|err| err.to_string())
     }
 
     pub fn load_transcript(&self, id: &str) -> Result<TranscriptRecord, String> {
-        if id == "latest" {
-            return self.store.latest_transcript().map_err(|err| err.to_string());
-        }
-
-        self.store.load_transcript(id).map_err(|err| err.to_string())
+        let resolved = self.resolve_selector(id)?;
+        self.store
+            .load_transcript(&resolved)
+            .map_err(|err| err.to_string())
     }
 
     pub fn export_session(&self, id: &str) -> Result<SessionExport, String> {
@@ -447,15 +452,8 @@ impl RuntimeEngine {
     }
 
     pub fn delete_session(&self, target: &str) -> Result<SessionDeletion, String> {
-        if target == "latest" {
-            let latest = self.store.latest().map_err(|err| err.to_string())?;
-            return self
-                .store
-                .delete(&latest.session_id.to_string())
-                .map_err(|err| err.to_string());
-        }
-
-        self.store.delete(target).map_err(|err| err.to_string())
+        let resolved = self.resolve_selector(target)?;
+        self.store.delete(&resolved).map_err(|err| err.to_string())
     }
 
     fn comparison_side_for(&self, id: &str) -> Result<SessionComparisonSide, String> {
@@ -1343,6 +1341,129 @@ mod tests {
             first_after.label.as_deref(),
             Some("runtime-review"),
             "first session's label must survive a rename of a different session"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn label_selectors_target_persisted_sessions_across_load_show_compare_and_delete() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let alpha = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap alpha session");
+        let alpha_id = alpha.session.session_id.to_string();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let beta = engine
+            .bootstrap(Prompt::new("summary please"))
+            .expect("bootstrap beta session");
+        let beta_id = beta.session.session_id.to_string();
+
+        // Label only the older session so latest != labeled — proves the
+        // selectors resolve independently and not via newest-first fallback.
+        engine
+            .rename_session(&alpha_id, "alpha-label")
+            .expect("label alpha session");
+
+        // load_session via label resolves to the labeled (older) session.
+        let loaded = engine
+            .load_session("label:alpha-label")
+            .expect("load by label selector");
+        assert_eq!(loaded.session_id.to_string(), alpha_id);
+
+        // Raw id targeting still works unchanged after labeling exists.
+        let raw_loaded = engine
+            .load_session(&beta_id)
+            .expect("load by raw id still works");
+        assert_eq!(raw_loaded.session_id.to_string(), beta_id);
+
+        // compare_sessions accepts label on one side and latest on the other,
+        // and the resulting JSON identifies the actual resolved session_ids
+        // rather than the selector strings.
+        let comparison = engine
+            .compare_sessions("label:alpha-label", "latest")
+            .expect("label-vs-latest compare");
+        assert_eq!(comparison.left_session_id.to_string(), alpha_id);
+        assert_eq!(comparison.right_session_id.to_string(), beta_id);
+        assert!(!comparison.differences.same_session);
+
+        // delete_session via label resolves to the labeled session and leaves
+        // the unlabeled sibling intact.
+        let deletion = engine
+            .delete_session("label:alpha-label")
+            .expect("delete by label");
+        assert_eq!(deletion.deleted_session_id.to_string(), alpha_id);
+        assert!(engine.load_session(&alpha_id).is_err());
+        assert_eq!(
+            engine
+                .load_session(&beta_id)
+                .expect("beta must survive")
+                .session_id
+                .to_string(),
+            beta_id,
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn label_selector_failures_are_clean_for_unknown_ambiguous_and_malformed_inputs() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        // Unknown label fails cleanly and leaves no persisted state behind.
+        let unknown = engine.load_session("label:missing");
+        assert!(unknown.is_err(), "unknown label must fail");
+        assert!(
+            unknown.unwrap_err().contains("label:missing"),
+            "error should preserve the selector the user typed"
+        );
+
+        // Two sessions sharing one label is an ambiguity error.
+        let one = engine
+            .bootstrap(Prompt::new("alpha"))
+            .expect("bootstrap one");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let two = engine
+            .bootstrap(Prompt::new("beta"))
+            .expect("bootstrap two");
+        engine
+            .rename_session(&one.session.session_id.to_string(), "shared")
+            .expect("label one");
+        engine
+            .rename_session(&two.session.session_id.to_string(), "shared")
+            .expect("label two");
+        let ambiguous = engine.load_session("label:shared");
+        assert!(ambiguous.is_err(), "ambiguous label must fail");
+        let err = ambiguous.unwrap_err();
+        assert!(
+            err.contains("ambiguous session label"),
+            "error should mention ambiguity, got: {err}"
+        );
+
+        // `label:` with no name is a malformed selector — distinct from
+        // unknown-label so the CLI can surface the right diagnosis.
+        let malformed = engine.load_session("label:");
+        assert!(malformed.is_err(), "malformed selector must fail");
+        assert!(
+            malformed.unwrap_err().contains("malformed session selector"),
+            "error should mention malformed selector"
         );
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
