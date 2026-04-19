@@ -179,7 +179,8 @@ Session and transcript concerns:
 - `TranscriptEntry`
 - `TranscriptStore`
 - `TranscriptRecord` (on-disk transcript format: `session_id`, `created_at_ms`, `updated_at_ms`, ordered `entries`)
-- `SessionExport` (deterministic export bundle: `exported_session_id`, `session`, `transcript`; bundles session state with its transcript for archival, sharing, or debugging)
+- `SessionExport` (deterministic export bundle: `exported_session_id`, `session`, `transcript`; bundles session state with its transcript for archival, sharing, or debugging; the same shape is the accepted input for `session-import`, closing the loop between export and import)
+- `SessionImport` (deterministic import result: `imported_session_id`, `session_path`, `transcript_path`; records that a bundle was round-tripped back into the store and which local files were written)
 - `SessionComparison` (deterministic comparison bundle: `left_session_id`, `right_session_id`, `left`, `right`, `differences`; `differences` carries a `same_session` flag plus signed `created_at_ms_delta`, `updated_at_ms_delta`, `message_count_delta`, and `transcript_entry_count_delta` computed as `right - left` so the direction of the comparison is preserved)
 - `SessionStore`
 - recency metadata for persisted sessions (`created_at_ms`) plus activity metadata (`updated_at_ms`) that bumps on resume so `latest` follows the most recently active session
@@ -229,6 +230,7 @@ User-facing CLI:
 - `session-export <id>` and `session-export latest` (deterministic JSON export bundle that packages session state plus transcript together; output confirms the exported session id and preserves turn ordering)
 - `session-compare <left-id> <right-id>` with `latest` accepted on either side (deterministic JSON comparison bundle that identifies both compared session ids and reports signed deltas for recency/activity metadata and transcript/turn counts)
 - `session-delete <id>` and `session-delete latest` (removes both the session JSON and its sibling transcript JSON; deterministic JSON output identifies the deleted session id and the removed paths, and the command fails cleanly without deleting anything else when the target session does not exist)
+- `session-import <bundle-path>` (imports a persisted session bundle from a JSON file in the `session-export` shape; recreates both the session JSON and its sibling transcript JSON, preserves the imported session id, recency/activity metadata, and transcript `turn_index` ordering, and fails cleanly without overwriting unrelated persisted sessions when the bundle is invalid or the target session id already exists locally)
 
 ## Structured Event Model
 

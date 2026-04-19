@@ -49,7 +49,7 @@ The first meaningful milestone is:
 - tool and command registries
 - deterministic routing
 - runtime turn processor with structured events
-- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, session export, session comparison, and session deletion
+- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, session export, session comparison, session deletion, and session import
 
 See:
 
@@ -694,6 +694,22 @@ cargo run -q -p harness-cli -- session-delete latest
 }
 ```
 
+### `session-import <bundle-path>`
+
+Restore a persisted session from a bundle file previously emitted by `session-export`. The input must match the exported shape `{ exported_session_id, session, transcript }`: the three ids must agree, and transcript `turn_index` values must be monotonic starting at `0`. On success both persisted artifacts are recreated in the local `.sessions/` directory — the session JSON at `.sessions/<session-id>.json` and the sibling transcript JSON at `.sessions/<session-id>.transcript.json` — preserving the imported session id, recency/activity metadata, and `turn_index` ordering exactly as carried in the bundle. If the bundle is malformed or the target session id already exists locally, the command fails cleanly without overwriting unrelated persisted sessions.
+
+```bash
+cargo run -q -p harness-cli -- session-import ./bundle.json
+```
+
+```json
+{
+  "imported_session_id": "<session-id>",
+  "session_path": ".sessions/<session-id>.json",
+  "transcript_path": ".sessions/<session-id>.transcript.json"
+}
+```
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -722,6 +738,9 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::delete` behavior: removes both the session JSON and its sibling transcript JSON, reports the removed paths in deterministic order, and fails with `SessionNotFound` without touching sibling sessions when the target does not exist
 - `harness-runtime` `delete_session` behavior: resolves the `latest` selector to the most recently active persisted session, removes both persisted artifacts for that session, and leaves untouched sessions intact
 - README-backed CLI coverage for `session-delete <id>` and `session-delete latest` confirming the output identifies the deleted session id, lists the removed paths in `session.json` then `transcript.json` order, and that the session disappears from subsequent listings
+- `harness-session` `SessionStore::import_bundle` behavior: validates that the bundle's `exported_session_id`, nested `session.session_id`, and nested `transcript.session_id` all agree, rejects bundles whose transcript `turn_index` values are non-monotonic, refuses to overwrite an existing persisted session id, and on success writes both the session JSON and its sibling transcript JSON preserving the imported session id, recency/activity metadata, and turn ordering exactly as carried in the bundle
+- `harness-runtime` `import_session` behavior: reads a persisted bundle from a user-supplied path, round-trips a `session-export` bundle into a fresh store, reports the imported session id plus the written session and transcript paths, and fails cleanly when the bundle path is missing or the target session id already exists locally
+- README-backed CLI coverage for `session-import <bundle-path>` confirming the output identifies the imported session id and the written session and transcript paths, and that a duplicate import against the same store fails cleanly without touching the already-imported session
 
 Validation commands:
 
@@ -781,3 +800,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI session export for persisted session bundles (`session-export <id>` and `session-export latest`) in a deterministic JSON shape packaging session state plus transcript
 - [x] CLI session comparison for persisted sessions (`session-compare <left-id> <right-id>` with `latest` accepted on either side) in a deterministic JSON shape that identifies both compared session ids and reports signed deltas for recency metadata and transcript/turn counts
 - [x] CLI session deletion for persisted sessions (`session-delete <id>` and `session-delete latest`) that removes both the session JSON and its sibling transcript JSON in one call, with deterministic JSON output identifying the deleted session id plus the removed paths, and a clean failure when the target session does not exist
+- [x] CLI session import for persisted session bundles (`session-import <bundle-path>`) that accepts the deterministic `{ exported_session_id, session, transcript }` shape emitted by `session-export`, recreates both persisted artifacts preserving the imported session id, recency/activity metadata, and transcript `turn_index` ordering, and fails cleanly without overwriting unrelated persisted sessions when the bundle is invalid or the target session id already exists locally

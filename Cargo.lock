@@ -186,6 +186,7 @@ dependencies = [
  "harness-session",
  "harness-tools",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
