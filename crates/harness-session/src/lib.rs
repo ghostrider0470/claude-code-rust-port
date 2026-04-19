@@ -228,6 +228,13 @@ pub struct SessionUnlabel {
     pub removed_label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRetag {
+    pub retagged_session_id: SessionId,
+    pub previous_label: String,
+    pub applied_label: String,
+}
+
 pub fn normalize_label(raw: &str) -> Result<String, RuntimeError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -580,6 +587,36 @@ impl SessionStore {
         Ok(SessionUnlabel {
             unlabeled_session_id: session.session_id,
             removed_label,
+        })
+    }
+
+    /// Replace the persisted `label` on a session that already carries one.
+    /// Preserves `session_id`, transcript entries/ordering, and `updated_at_ms`
+    /// so newest-first ordering stays activity-based. Fails with
+    /// `SessionAlreadyUnlabeled` when the session has no label to replace, and
+    /// with `SessionAlreadyLabeled` when the requested label normalizes to the
+    /// same effective value already persisted.
+    pub fn retag(&self, session_id: &str, label: &str) -> Result<SessionRetag, RuntimeError> {
+        let applied_label = normalize_label(label)?;
+
+        let mut session = self.load(session_id)?;
+        let previous_label = session
+            .label
+            .clone()
+            .ok_or_else(|| RuntimeError::SessionAlreadyUnlabeled(session.session_id.to_string()))?;
+        if previous_label == applied_label {
+            return Err(RuntimeError::SessionAlreadyLabeled(format!(
+                "{} already carries label {:?}",
+                session.session_id, applied_label
+            )));
+        }
+        session.label = Some(applied_label.clone());
+        self.save(&session)?;
+
+        Ok(SessionRetag {
+            retagged_session_id: session.session_id,
+            previous_label,
+            applied_label,
         })
     }
 
@@ -1906,6 +1943,141 @@ mod tests {
             reloaded.updated_at_ms, session.updated_at_ms,
             "failed unlabel must not bump activity metadata"
         );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn retag_replaces_label_preserves_id_transcript_and_activity_metadata() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash"), Prompt::new("summary please")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 4,
+                output_tokens: 4,
+            },
+            label: Some("runtime-review".to_string()),
+        };
+        let mut transcript = TranscriptStore::default();
+        transcript.append(Prompt::new("review bash"));
+        transcript.append(Prompt::new("summary please"));
+        let record = TranscriptRecord::from_session(&session, &transcript);
+
+        store.save(&session).expect("save session");
+        store.save_transcript(&record).expect("save transcript");
+
+        let id = session.session_id.to_string();
+        let retagged = store
+            .retag(&id, "  release-candidate  ")
+            .expect("retag persisted session");
+
+        assert_eq!(retagged.retagged_session_id, session.session_id);
+        assert_eq!(retagged.previous_label, "runtime-review");
+        assert_eq!(retagged.applied_label, "release-candidate");
+
+        let reloaded = store.load(&id).expect("reload retagged session");
+        assert_eq!(reloaded.label.as_deref(), Some("release-candidate"));
+        assert_eq!(reloaded.created_at_ms, session.created_at_ms);
+        assert_eq!(
+            reloaded.updated_at_ms, session.updated_at_ms,
+            "retag must preserve updated_at_ms so newest-first ordering stays activity-based"
+        );
+        assert_eq!(reloaded.messages, session.messages);
+        assert_eq!(reloaded.usage, session.usage);
+
+        let reloaded_transcript = store
+            .load_transcript(&id)
+            .expect("reload transcript after retag");
+        assert_eq!(
+            reloaded_transcript, record,
+            "retag must not mutate transcript entries or ordering"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn retag_rejects_same_effective_label_and_unlabeled_and_invalid_inputs_without_touching_store() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let labeled = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+            label: Some("runtime-review".to_string()),
+        };
+        store.save(&labeled).expect("save labeled session");
+        let labeled_id = labeled.session_id.to_string();
+
+        // Same effective label (including surrounding whitespace that normalizes away).
+        match store.retag(&labeled_id, "  runtime-review  ") {
+            Err(RuntimeError::SessionAlreadyLabeled(reported)) => {
+                assert!(
+                    reported.contains(&labeled_id),
+                    "SessionAlreadyLabeled must surface the resolved session id: {reported}"
+                );
+            }
+            other => panic!("expected SessionAlreadyLabeled, got {other:?}"),
+        }
+
+        // Empty/whitespace-only labels surface InvalidLabel.
+        for invalid in ["", "   ", "\t\n"] {
+            match store.retag(&labeled_id, invalid) {
+                Err(RuntimeError::InvalidLabel(_)) => {}
+                other => panic!("expected InvalidLabel for {invalid:?}, got {other:?}"),
+            }
+        }
+
+        // Retagging an unlabeled session surfaces SessionAlreadyUnlabeled.
+        let unlabeled = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_002,
+            updated_at_ms: 1_700_000_000_060,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+            label: None,
+        };
+        store.save(&unlabeled).expect("save unlabeled session");
+        let unlabeled_id = unlabeled.session_id.to_string();
+        match store.retag(&unlabeled_id, "first-label") {
+            Err(RuntimeError::SessionAlreadyUnlabeled(reported)) => {
+                assert_eq!(
+                    reported, unlabeled_id,
+                    "SessionAlreadyUnlabeled must surface the resolved session id"
+                );
+            }
+            other => panic!("expected SessionAlreadyUnlabeled, got {other:?}"),
+        }
+
+        // Unknown session id surfaces SessionNotFound.
+        let missing = SessionId::new().to_string();
+        match store.retag(&missing, "anything") {
+            Err(RuntimeError::SessionNotFound(reported)) => assert_eq!(reported, missing),
+            other => panic!("expected SessionNotFound for missing id, got {other:?}"),
+        }
+
+        // All failing attempts must leave persisted state untouched.
+        let reloaded_labeled = store.load(&labeled_id).expect("reload labeled after failures");
+        assert_eq!(reloaded_labeled.label.as_deref(), Some("runtime-review"));
+        assert_eq!(reloaded_labeled.updated_at_ms, labeled.updated_at_ms);
+        let reloaded_unlabeled = store
+            .load(&unlabeled_id)
+            .expect("reload unlabeled after failures");
+        assert!(reloaded_unlabeled.label.is_none());
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
     }
