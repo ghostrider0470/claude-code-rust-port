@@ -198,6 +198,13 @@ pub struct SessionDeletion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionImport {
+    pub imported_session_id: SessionId,
+    pub session_path: String,
+    pub transcript_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListing {
     pub session_id: SessionId,
     pub created_at_ms: u64,
@@ -306,6 +313,49 @@ impl SessionStore {
         })
     }
 
+    pub fn import_bundle(
+        &self,
+        bundle: &SessionExport,
+    ) -> Result<SessionImport, RuntimeError> {
+        if bundle.exported_session_id != bundle.session.session_id {
+            return Err(RuntimeError::InvalidBundle(format!(
+                "exported_session_id {} does not match nested session.session_id {}",
+                bundle.exported_session_id, bundle.session.session_id
+            )));
+        }
+        if bundle.exported_session_id != bundle.transcript.session_id {
+            return Err(RuntimeError::InvalidBundle(format!(
+                "exported_session_id {} does not match nested transcript.session_id {}",
+                bundle.exported_session_id, bundle.transcript.session_id
+            )));
+        }
+        for (position, entry) in bundle.transcript.entries.iter().enumerate() {
+            if entry.turn_index.0 != position {
+                return Err(RuntimeError::InvalidBundle(format!(
+                    "transcript entry at position {} declares turn_index {} (expected {})",
+                    position, entry.turn_index.0, position
+                )));
+            }
+        }
+
+        let id = bundle.exported_session_id.to_string();
+        let session_path = self.root.join(format!("{id}.json"));
+        let transcript_path = self.transcript_path(&id);
+
+        if session_path.exists() || transcript_path.exists() {
+            return Err(RuntimeError::SessionAlreadyExists(id));
+        }
+
+        let saved_session_path = self.save(&bundle.session)?;
+        let saved_transcript_path = self.save_transcript(&bundle.transcript)?;
+
+        Ok(SessionImport {
+            imported_session_id: bundle.session.session_id.clone(),
+            session_path: saved_session_path.display().to_string(),
+            transcript_path: saved_transcript_path.display().to_string(),
+        })
+    }
+
     pub fn list(&self) -> Result<Vec<SessionListing>, RuntimeError> {
         if !self.root.exists() {
             return Ok(Vec::new());
@@ -361,9 +411,9 @@ impl SessionStore {
 mod tests {
     use super::{
         SessionComparison, SessionComparisonSide, SessionExport, SessionState, SessionStore,
-        TranscriptRecord, TranscriptStore,
+        TranscriptEntry, TranscriptRecord, TranscriptStore,
     };
-    use harness_core::{Prompt, RuntimeError, SessionId};
+    use harness_core::{Prompt, RuntimeError, SessionId, TurnIndex};
     use std::collections::BTreeMap;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -834,6 +884,194 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn import_bundle_writes_session_and_transcript_preserving_id_metadata_and_turn_order() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_777,
+            messages: vec![Prompt::new("review bash"), Prompt::new("summary please")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 4,
+                output_tokens: 4,
+            },
+        };
+        let mut transcript = TranscriptStore::default();
+        transcript.append(Prompt::new("review bash"));
+        transcript.append(Prompt::new("summary please"));
+        let record = TranscriptRecord::from_session(&session, &transcript);
+        let bundle = SessionExport::new(session.clone(), record.clone());
+
+        let imported = store.import_bundle(&bundle).expect("import bundle");
+
+        assert_eq!(imported.imported_session_id, session.session_id);
+        assert_eq!(
+            imported.session_path,
+            root.join(format!("{}.json", session.session_id))
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            imported.transcript_path,
+            root.join(format!("{}.transcript.json", session.session_id))
+                .display()
+                .to_string()
+        );
+
+        let reloaded = store
+            .load(&session.session_id.to_string())
+            .expect("reload imported session");
+        assert_eq!(reloaded, session);
+        assert_eq!(reloaded.created_at_ms, 1_700_000_000_001);
+        assert_eq!(reloaded.updated_at_ms, 1_700_000_000_777);
+
+        let reloaded_transcript = store
+            .load_transcript(&session.session_id.to_string())
+            .expect("reload imported transcript");
+        assert_eq!(reloaded_transcript, record);
+        let ordered: Vec<(usize, String)> = reloaded_transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "summary please".to_string()),
+            ]
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn import_bundle_rejects_existing_session_without_touching_siblings() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let keeper = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("keep me")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+        let mut keeper_transcript = TranscriptStore::default();
+        keeper_transcript.append(Prompt::new("keep me"));
+        let keeper_record = TranscriptRecord::from_session(&keeper, &keeper_transcript);
+        store.save(&keeper).expect("save keeper");
+        store
+            .save_transcript(&keeper_record)
+            .expect("save keeper transcript");
+
+        let bundle = SessionExport::new(keeper.clone(), keeper_record.clone());
+        match store.import_bundle(&bundle) {
+            Err(RuntimeError::SessionAlreadyExists(reported)) => {
+                assert_eq!(reported, keeper.session_id.to_string());
+            }
+            other => panic!("expected SessionAlreadyExists, got {other:?}"),
+        }
+
+        let reloaded = store
+            .load(&keeper.session_id.to_string())
+            .expect("existing session must survive");
+        assert_eq!(reloaded, keeper, "existing session must not be overwritten");
+        let reloaded_transcript = store
+            .load_transcript(&keeper.session_id.to_string())
+            .expect("existing transcript must survive");
+        assert_eq!(reloaded_transcript, keeper_record);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn import_bundle_rejects_mismatched_session_ids_without_writing() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("one")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+        let mut transcript = TranscriptStore::default();
+        transcript.append(Prompt::new("one"));
+        let mut record = TranscriptRecord::from_session(&session, &transcript);
+        record.session_id = SessionId::new();
+        let bundle = SessionExport::new(session.clone(), record);
+
+        match store.import_bundle(&bundle) {
+            Err(RuntimeError::InvalidBundle(_)) => {}
+            other => panic!("expected InvalidBundle for mismatched transcript id, got {other:?}"),
+        }
+
+        assert!(
+            !root.join(format!("{}.json", session.session_id)).exists(),
+            "session JSON must not be written when bundle is invalid"
+        );
+        assert!(
+            !root
+                .join(format!("{}.transcript.json", session.session_id))
+                .exists(),
+            "transcript JSON must not be written when bundle is invalid"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn import_bundle_rejects_non_monotonic_turn_indexes() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("a"), Prompt::new("b")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+        };
+        let record = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: vec![
+                TranscriptEntry {
+                    turn_index: TurnIndex(1),
+                    prompt: Prompt::new("a"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(2),
+                    prompt: Prompt::new("b"),
+                },
+            ],
+        };
+        let bundle = SessionExport::new(session.clone(), record);
+
+        match store.import_bundle(&bundle) {
+            Err(RuntimeError::InvalidBundle(_)) => {}
+            other => panic!("expected InvalidBundle for non-monotonic turn indexes, got {other:?}"),
+        }
+
+        assert!(!root.join(format!("{}.json", session.session_id)).exists());
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

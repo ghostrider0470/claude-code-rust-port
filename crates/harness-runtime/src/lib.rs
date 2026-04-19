@@ -3,9 +3,11 @@ use harness_core::{
     CommandName, MatchScore, PermissionDenial, Prompt, RuntimeEvent, SessionId, ToolName, TurnIndex,
 };
 use harness_session::{
-    SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionListing,
-    SessionState, SessionStore, TranscriptRecord, TranscriptStore,
+    SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionImport,
+    SessionListing, SessionState, SessionStore, TranscriptRecord, TranscriptStore,
 };
+use std::fs;
+use std::path::Path;
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
 
@@ -410,6 +412,19 @@ impl RuntimeEngine {
             self.comparison_side_for(left)?,
             self.comparison_side_for(right)?,
         ))
+    }
+
+    pub fn import_session(&self, bundle_path: &str) -> Result<SessionImport, String> {
+        let path = Path::new(bundle_path);
+        let body = fs::read_to_string(path).map_err(|err| {
+            format!("failed to read bundle at {}: {err}", path.display())
+        })?;
+        let bundle: SessionExport = serde_json::from_str(&body).map_err(|err| {
+            format!("failed to parse session bundle at {}: {err}", path.display())
+        })?;
+        self.store
+            .import_bundle(&bundle)
+            .map_err(|err| err.to_string())
     }
 
     pub fn delete_session(&self, target: &str) -> Result<SessionDeletion, String> {
@@ -856,6 +871,117 @@ mod tests {
         assert_eq!(remaining_ids, vec![first_id]);
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn import_session_round_trips_export_into_a_fresh_store_and_rejects_duplicates() {
+        use harness_core::Prompt;
+        use std::path::Path;
+
+        let source_root = temp_session_root();
+        let source_engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&source_root),
+        };
+
+        let bootstrap = source_engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap session");
+        let id = bootstrap.session.session_id.to_string();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _ = source_engine
+            .resume(&id, Prompt::new("summary please"))
+            .expect("resume session");
+
+        let export = source_engine.export_session(&id).expect("export session");
+
+        let bundle_path = std::env::temp_dir().join(format!("harness-import-bundle-{id}.json"));
+        let body = serde_json::to_string_pretty(&export).expect("serialize bundle");
+        fs::write(&bundle_path, &body).expect("write bundle");
+
+        let target_root = temp_session_root();
+        let target_engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&target_root),
+        };
+
+        let imported = target_engine
+            .import_session(bundle_path.to_str().expect("bundle path utf8"))
+            .expect("import session bundle");
+        assert_eq!(imported.imported_session_id.to_string(), id);
+        assert_eq!(
+            imported.session_path,
+            target_root.join(format!("{id}.json")).display().to_string()
+        );
+        assert_eq!(
+            imported.transcript_path,
+            target_root
+                .join(format!("{id}.transcript.json"))
+                .display()
+                .to_string()
+        );
+        assert!(Path::new(&imported.session_path).exists());
+        assert!(Path::new(&imported.transcript_path).exists());
+
+        let reloaded = target_engine
+            .load_session(&id)
+            .expect("reload imported session");
+        assert_eq!(reloaded, export.session);
+        let reloaded_transcript = target_engine
+            .load_transcript(&id)
+            .expect("reload imported transcript");
+        let ordered: Vec<(usize, String)> = reloaded_transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "summary please".to_string()),
+            ]
+        );
+
+        let duplicate = target_engine.import_session(bundle_path.to_str().unwrap());
+        assert!(duplicate.is_err(), "duplicate import must fail cleanly");
+        let err = duplicate.unwrap_err();
+        assert!(
+            err.contains("session already exists"),
+            "duplicate-import error should mention existing session, got: {err}"
+        );
+
+        fs::remove_file(&bundle_path).ok();
+        fs::remove_dir_all(&source_root).ok();
+        fs::remove_dir_all(&target_root).ok();
+    }
+
+    #[test]
+    fn import_session_reports_missing_bundle_path_cleanly() {
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let missing =
+            std::env::temp_dir().join("harness-import-bundle-definitely-missing-xyzzy.json");
+        let _ = fs::remove_file(&missing);
+        let result = engine.import_session(missing.to_str().unwrap());
+        assert!(result.is_err(), "missing bundle path must fail");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("failed to read bundle"),
+            "error should describe read failure, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

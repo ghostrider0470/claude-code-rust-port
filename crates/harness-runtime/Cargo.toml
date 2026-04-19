@@ -11,3 +11,4 @@ harness-core = { path = "../harness-core" }
 harness-session = { path = "../harness-session" }
 harness-tools = { path = "../harness-tools" }
 serde.workspace = true
+serde_json.workspace = true

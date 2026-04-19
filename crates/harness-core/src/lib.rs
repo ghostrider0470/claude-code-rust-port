@@ -154,6 +154,10 @@ pub enum RuntimeError {
     Serialization(String),
     #[error("session not found: {0}")]
     SessionNotFound(String),
+    #[error("session already exists: {0}")]
+    SessionAlreadyExists(String),
+    #[error("invalid session bundle: {0}")]
+    InvalidBundle(String),
 }
 
 pub fn estimate_tokens(text: &str) -> usize {

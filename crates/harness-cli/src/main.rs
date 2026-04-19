@@ -24,6 +24,7 @@ enum CliCommand {
     SessionExport { id: String },
     SessionCompare { left: String, right: String },
     SessionDelete { id: String },
+    SessionImport { path: String },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -81,6 +82,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("delete persisted session");
             serde_json::to_string_pretty(&deletion).expect("serialize session deletion")
         }
+        CliCommand::SessionImport { path } => {
+            let imported = engine
+                .import_session(&path)
+                .expect("import persisted session bundle");
+            serde_json::to_string_pretty(&imported).expect("serialize session import")
+        }
     }
 }
 
@@ -97,8 +104,8 @@ mod tests {
     use harness_commands::CommandRegistry;
     use harness_runtime::RuntimeEngine;
     use harness_session::{
-        SessionComparison, SessionDeletion, SessionExport, SessionState, SessionStore,
-        TranscriptRecord,
+        SessionComparison, SessionDeletion, SessionExport, SessionImport, SessionState,
+        SessionStore, TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -796,6 +803,117 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_import_matches_readme_example_and_restores_bundle_into_fresh_store() {
+        let source_root = temp_session_root();
+        let source_engine = temp_engine(&source_root);
+        let bootstrap_output = render_command(
+            &source_engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let export_output = render_command(
+            &source_engine,
+            CliCommand::SessionExport {
+                id: session_id.clone(),
+            },
+        );
+        let bundle_path = std::env::temp_dir()
+            .join(format!("harness-cli-import-bundle-{session_id}.json"));
+        fs::write(&bundle_path, &export_output).expect("write bundle file");
+
+        let target_root = temp_session_root();
+        let target_engine = temp_engine(&target_root);
+
+        let import_output = render_command(
+            &target_engine,
+            CliCommand::SessionImport {
+                path: bundle_path.to_string_lossy().into_owned(),
+            },
+        );
+
+        let imported: SessionImport =
+            serde_json::from_str(&import_output).expect("parse session-import output");
+        assert_eq!(
+            imported.imported_session_id.to_string(),
+            session_id,
+            "import output must confirm the imported session id"
+        );
+        assert_eq!(
+            imported.session_path,
+            target_root
+                .join(format!("{session_id}.json"))
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            imported.transcript_path,
+            target_root
+                .join(format!("{session_id}.transcript.json"))
+                .display()
+                .to_string()
+        );
+        assert!(Path::new(&imported.session_path).exists());
+        assert!(Path::new(&imported.transcript_path).exists());
+
+        let reloaded = target_engine
+            .load_session(&session_id)
+            .expect("reload imported session");
+        assert_eq!(reloaded.session_id.to_string(), session_id);
+        let reloaded_transcript = target_engine
+            .load_transcript(&session_id)
+            .expect("reload imported transcript");
+        let ordered: Vec<(usize, String)> = reloaded_transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![(0, "review bash".to_string())],
+            "imported transcript must preserve turn ordering"
+        );
+
+        assert_eq!(
+            normalize_bootstrap_example(&import_output, &session_id, &target_root),
+            readme_output_block("session-import <bundle-path>", "json")
+        );
+
+        fs::remove_file(&bundle_path).ok();
+        fs::remove_dir_all(&source_root).ok();
+        fs::remove_dir_all(&target_root).ok();
+    }
+
+    #[test]
+    fn session_import_fails_cleanly_for_missing_bundle_without_persisting_anything() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let missing = std::env::temp_dir()
+            .join("harness-cli-import-bundle-definitely-missing-xyzzy.json");
+        let _ = fs::remove_file(&missing);
+
+        let result = engine.import_session(missing.to_string_lossy().as_ref());
+        assert!(result.is_err(), "missing bundle path must fail");
+        assert!(
+            engine
+                .list_sessions()
+                .expect("list sessions after failed import")
+                .is_empty(),
+            "no persisted sessions should be written when import fails"
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
