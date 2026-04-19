@@ -49,7 +49,7 @@ The first meaningful milestone is:
 - tool and command registries
 - deterministic routing
 - runtime turn processor with structured events
-- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, and session export
+- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, session export, and session comparison
 
 See:
 
@@ -586,6 +586,78 @@ cargo run -q -p harness-cli -- session-export latest
 }
 ```
 
+### `session-compare <left-id> <right-id>`
+
+Compare two persisted sessions side-by-side as a single machine-readable JSON bundle. The output uses a deterministic shape: `{ left_session_id, right_session_id, left, right, differences }`. Both `left` and `right` carry the compared session's `session_id`, recency metadata (`created_at_ms`, `updated_at_ms`), and activity metadata (`message_count`, `transcript_entry_count`). `differences` reports signed deltas computed as `right - left` so the comparison direction is preserved, plus a `same_session` flag that is `true` when both sides resolve to the same persisted session. Either side accepts the literal `latest` selector, mirroring how `session-show latest`, `transcript-show latest`, and `session-export latest` resolve the most recently active persisted session.
+
+```bash
+cargo run -q -p harness-cli -- session-compare <left-session-id> <right-session-id>
+```
+
+```json
+{
+  "left_session_id": "<left-session-id>",
+  "right_session_id": "<right-session-id>",
+  "left": {
+    "session_id": "<left-session-id>",
+    "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
+    "message_count": 1,
+    "transcript_entry_count": 1
+  },
+  "right": {
+    "session_id": "<right-session-id>",
+    "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
+    "message_count": 1,
+    "transcript_entry_count": 1
+  },
+  "differences": {
+    "same_session": false,
+    "created_at_ms_delta": <created-at-ms-delta>,
+    "updated_at_ms_delta": <updated-at-ms-delta>,
+    "message_count_delta": 0,
+    "transcript_entry_count_delta": 0
+  }
+}
+```
+
+### `session-compare latest latest`
+
+Resolving both sides to `latest` yields a deterministic self-comparison where `same_session` is `true` and every delta is `0`. This is the smallest way to confirm the comparison path is healthy without needing two distinct persisted sessions in hand.
+
+```bash
+cargo run -q -p harness-cli -- session-compare latest latest
+```
+
+```json
+{
+  "left_session_id": "<session-id>",
+  "right_session_id": "<session-id>",
+  "left": {
+    "session_id": "<session-id>",
+    "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
+    "message_count": 1,
+    "transcript_entry_count": 1
+  },
+  "right": {
+    "session_id": "<session-id>",
+    "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
+    "message_count": 1,
+    "transcript_entry_count": 1
+  },
+  "differences": {
+    "same_session": true,
+    "created_at_ms_delta": 0,
+    "updated_at_ms_delta": 0,
+    "message_count_delta": 0,
+    "transcript_entry_count_delta": 0
+  }
+}
+```
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -608,6 +680,9 @@ Current protected Rust surface:
 - `harness-session` `SessionExport` bundle round-trip: packages session state plus transcript, confirms the exported session id, and preserves `turn_index` ordering in the exported transcript with deterministic serialization
 - `harness-runtime` `export_session` behavior: bundles the persisted session and its transcript for an explicit id, and `latest` resolves to the same bundle
 - README-backed CLI coverage for `session-export <id>` and `session-export latest` confirming the output exposes the `exported_session_id` and preserves turn ordering
+- `harness-session` `SessionComparison` bundle: pairs two sides with shared recency/activity metadata, reports signed `right - left` deltas (including negative deltas when order is reversed), exposes a `same_session` flag, and serializes deterministically
+- `harness-runtime` `compare_sessions` behavior: resolves explicit ids and the `latest` selector on either side, computes deltas against persisted session state plus transcripts, and treats a self-comparison as `same_session: true` with zero deltas
+- README-backed CLI coverage for `session-compare <left-id> <right-id>` and `session-compare latest latest` confirming the output identifies both compared session ids and that a `latest latest` self-comparison reports `same_session: true` with every delta equal to `0`
 
 Validation commands:
 
@@ -665,3 +740,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI session resume for persisted sessions (explicit id and `latest`)
 - [x] Persisted transcript files per session and CLI transcript inspection (`transcript-show <id>` and `transcript-show latest`)
 - [x] CLI session export for persisted session bundles (`session-export <id>` and `session-export latest`) in a deterministic JSON shape packaging session state plus transcript
+- [x] CLI session comparison for persisted sessions (`session-compare <left-id> <right-id>` with `latest` accepted on either side) in a deterministic JSON shape that identifies both compared session ids and reports signed deltas for recency metadata and transcript/turn counts

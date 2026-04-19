@@ -117,6 +117,81 @@ impl SessionExport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionComparisonSide {
+    pub session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub message_count: usize,
+    pub transcript_entry_count: usize,
+}
+
+impl SessionComparisonSide {
+    pub fn from_parts(session: &SessionState, transcript: &TranscriptRecord) -> Self {
+        Self {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            message_count: session.messages.len(),
+            transcript_entry_count: transcript.entries.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionComparisonDifferences {
+    pub same_session: bool,
+    pub created_at_ms_delta: i64,
+    pub updated_at_ms_delta: i64,
+    pub message_count_delta: i64,
+    pub transcript_entry_count_delta: i64,
+}
+
+impl SessionComparisonDifferences {
+    pub fn between(left: &SessionComparisonSide, right: &SessionComparisonSide) -> Self {
+        Self {
+            same_session: left.session_id == right.session_id,
+            created_at_ms_delta: signed_delta(left.created_at_ms, right.created_at_ms),
+            updated_at_ms_delta: signed_delta(left.updated_at_ms, right.updated_at_ms),
+            message_count_delta: signed_usize_delta(left.message_count, right.message_count),
+            transcript_entry_count_delta: signed_usize_delta(
+                left.transcript_entry_count,
+                right.transcript_entry_count,
+            ),
+        }
+    }
+}
+
+fn signed_delta(left: u64, right: u64) -> i64 {
+    (right as i128 - left as i128) as i64
+}
+
+fn signed_usize_delta(left: usize, right: usize) -> i64 {
+    (right as i128 - left as i128) as i64
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionComparison {
+    pub left_session_id: SessionId,
+    pub right_session_id: SessionId,
+    pub left: SessionComparisonSide,
+    pub right: SessionComparisonSide,
+    pub differences: SessionComparisonDifferences,
+}
+
+impl SessionComparison {
+    pub fn new(left: SessionComparisonSide, right: SessionComparisonSide) -> Self {
+        let differences = SessionComparisonDifferences::between(&left, &right);
+        Self {
+            left_session_id: left.session_id.clone(),
+            right_session_id: right.session_id.clone(),
+            left,
+            right,
+            differences,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListing {
     pub session_id: SessionId,
     pub created_at_ms: u64,
@@ -253,7 +328,10 @@ impl SessionStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionExport, SessionState, SessionStore, TranscriptRecord, TranscriptStore};
+    use super::{
+        SessionComparison, SessionComparisonSide, SessionExport, SessionState, SessionStore,
+        TranscriptRecord, TranscriptStore,
+    };
     use harness_core::{Prompt, SessionId};
     use std::collections::BTreeMap;
     use std::fs;
@@ -572,6 +650,78 @@ mod tests {
         let roundtrip: SessionExport =
             serde_json::from_str(&serialized).expect("deserialize export");
         assert_eq!(roundtrip, export);
+    }
+
+    #[test]
+    fn session_comparison_reports_signed_deltas_and_same_session_flag() {
+        let left_state = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_100,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+        };
+        let right_state = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_050,
+            updated_at_ms: 1_700_000_000_500,
+            messages: vec![
+                Prompt::new("review bash"),
+                Prompt::new("summary please"),
+                Prompt::new("one more"),
+            ],
+            usage: harness_core::UsageSummary {
+                input_tokens: 6,
+                output_tokens: 6,
+            },
+        };
+
+        let mut left_transcript = TranscriptStore::default();
+        left_transcript.append(Prompt::new("review bash"));
+        let mut right_transcript = TranscriptStore::default();
+        right_transcript.append(Prompt::new("review bash"));
+        right_transcript.append(Prompt::new("summary please"));
+        right_transcript.append(Prompt::new("one more"));
+
+        let left_record = TranscriptRecord::from_session(&left_state, &left_transcript);
+        let right_record = TranscriptRecord::from_session(&right_state, &right_transcript);
+
+        let left = SessionComparisonSide::from_parts(&left_state, &left_record);
+        let right = SessionComparisonSide::from_parts(&right_state, &right_record);
+        let comparison = SessionComparison::new(left.clone(), right.clone());
+
+        assert_eq!(comparison.left_session_id, left_state.session_id);
+        assert_eq!(comparison.right_session_id, right_state.session_id);
+        assert_eq!(comparison.left, left);
+        assert_eq!(comparison.right, right);
+        assert!(!comparison.differences.same_session);
+        assert_eq!(comparison.differences.created_at_ms_delta, 50);
+        assert_eq!(comparison.differences.updated_at_ms_delta, 400);
+        assert_eq!(comparison.differences.message_count_delta, 2);
+        assert_eq!(comparison.differences.transcript_entry_count_delta, 2);
+
+        let reversed = SessionComparison::new(right.clone(), left.clone());
+        assert_eq!(reversed.differences.created_at_ms_delta, -50);
+        assert_eq!(reversed.differences.updated_at_ms_delta, -400);
+        assert_eq!(reversed.differences.message_count_delta, -2);
+        assert_eq!(reversed.differences.transcript_entry_count_delta, -2);
+
+        let self_compare = SessionComparison::new(left.clone(), left.clone());
+        assert!(self_compare.differences.same_session);
+        assert_eq!(self_compare.differences.created_at_ms_delta, 0);
+        assert_eq!(self_compare.differences.updated_at_ms_delta, 0);
+        assert_eq!(self_compare.differences.message_count_delta, 0);
+        assert_eq!(self_compare.differences.transcript_entry_count_delta, 0);
+
+        let serialized = serde_json::to_string(&comparison).expect("serialize comparison");
+        let again = serde_json::to_string(&comparison).expect("serialize comparison again");
+        assert_eq!(serialized, again, "comparison serialization should be deterministic");
+        let roundtrip: SessionComparison =
+            serde_json::from_str(&serialized).expect("deserialize comparison");
+        assert_eq!(roundtrip, comparison);
     }
 
     #[test]
