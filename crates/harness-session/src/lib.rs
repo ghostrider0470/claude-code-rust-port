@@ -205,6 +205,15 @@ pub struct SessionImport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionFork {
+    pub source_session_id: SessionId,
+    pub forked_session_id: SessionId,
+    pub appended_turn_index: TurnIndex,
+    pub session_path: String,
+    pub transcript_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListing {
     pub session_id: SessionId,
     pub created_at_ms: u64,
@@ -369,6 +378,54 @@ impl SessionStore {
             imported_session_id: bundle.session.session_id.clone(),
             session_path: saved_session_path.display().to_string(),
             transcript_path: saved_transcript_path.display().to_string(),
+        })
+    }
+
+    pub fn fork(
+        &self,
+        source_session_id: &str,
+        prompt: Prompt,
+    ) -> Result<SessionFork, RuntimeError> {
+        let source_session = self.load(source_session_id)?;
+        let source_transcript = self.load_transcript(source_session_id)?;
+
+        let forked_session_id = SessionId::new();
+        let now = current_timestamp_ms();
+        let appended_turn_index = TurnIndex(source_session.messages.len());
+
+        let mut forked_messages = source_session.messages.clone();
+        forked_messages.push(prompt.clone());
+
+        let forked_session = SessionState {
+            session_id: forked_session_id.clone(),
+            created_at_ms: now,
+            updated_at_ms: now,
+            messages: forked_messages,
+            usage: source_session.usage.add_turn(prompt.as_str(), "turn forked"),
+        };
+
+        let mut forked_entries = source_transcript.entries.clone();
+        forked_entries.push(TranscriptEntry {
+            turn_index: appended_turn_index,
+            prompt,
+        });
+
+        let forked_transcript = TranscriptRecord {
+            session_id: forked_session_id.clone(),
+            created_at_ms: now,
+            updated_at_ms: now,
+            entries: forked_entries,
+        };
+
+        let session_path = self.save(&forked_session)?;
+        let transcript_path = self.save_transcript(&forked_transcript)?;
+
+        Ok(SessionFork {
+            source_session_id: source_session.session_id,
+            forked_session_id,
+            appended_turn_index,
+            session_path: session_path.display().to_string(),
+            transcript_path: transcript_path.display().to_string(),
         })
     }
 
@@ -1260,6 +1317,124 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn fork_creates_new_session_id_carries_transcript_and_appends_divergent_turn() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let source = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash"), Prompt::new("summary please")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 4,
+                output_tokens: 4,
+            },
+        };
+        let mut source_transcript = TranscriptStore::default();
+        source_transcript.append(Prompt::new("review bash"));
+        source_transcript.append(Prompt::new("summary please"));
+        let source_record = TranscriptRecord::from_session(&source, &source_transcript);
+
+        store.save(&source).expect("save source session");
+        store
+            .save_transcript(&source_record)
+            .expect("save source transcript");
+
+        let fork = store
+            .fork(&source.session_id.to_string(), Prompt::new("try again"))
+            .expect("fork source session");
+
+        assert_eq!(fork.source_session_id, source.session_id);
+        assert_ne!(
+            fork.forked_session_id, source.session_id,
+            "forked session must use a fresh session id"
+        );
+        assert_eq!(fork.appended_turn_index, TurnIndex(2));
+        assert_eq!(
+            fork.session_path,
+            root.join(format!("{}.json", fork.forked_session_id))
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            fork.transcript_path,
+            root.join(format!("{}.transcript.json", fork.forked_session_id))
+                .display()
+                .to_string()
+        );
+
+        let forked_session = store
+            .load(&fork.forked_session_id.to_string())
+            .expect("load forked session");
+        assert_eq!(
+            forked_session
+                .messages
+                .iter()
+                .map(|prompt| prompt.0.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "review bash".to_string(),
+                "summary please".to_string(),
+                "try again".to_string(),
+            ],
+            "forked session must carry source messages then append the new prompt"
+        );
+
+        let forked_transcript = store
+            .load_transcript(&fork.forked_session_id.to_string())
+            .expect("load forked transcript");
+        let ordered: Vec<(usize, String)> = forked_transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "summary please".to_string()),
+                (2, "try again".to_string()),
+            ],
+            "forked transcript must preserve turn ordering and append the new prompt"
+        );
+        assert_eq!(forked_transcript.session_id, fork.forked_session_id);
+
+        let reloaded_source = store
+            .load(&source.session_id.to_string())
+            .expect("source session must survive");
+        assert_eq!(reloaded_source, source, "source session must not be mutated");
+        let reloaded_source_transcript = store
+            .load_transcript(&source.session_id.to_string())
+            .expect("source transcript must survive");
+        assert_eq!(
+            reloaded_source_transcript, source_record,
+            "source transcript must not be mutated"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn fork_errors_cleanly_when_source_session_is_missing() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let missing = SessionId::new().to_string();
+        match store.fork(&missing, Prompt::new("forked prompt")) {
+            Err(RuntimeError::SessionNotFound(reported)) => assert_eq!(reported, missing),
+            other => panic!("expected SessionNotFound for missing source id, got {other:?}"),
+        }
+
+        assert!(
+            !root.exists() || fs::read_dir(&root).map(|mut iter| iter.next().is_none()).unwrap_or(true),
+            "no persisted artifacts should be written when fork source is missing"
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
