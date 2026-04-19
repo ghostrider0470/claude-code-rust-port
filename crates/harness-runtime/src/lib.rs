@@ -5,8 +5,8 @@ use harness_core::{
 use harness_session::{
     SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
     SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionPin, SessionPinEntry,
-    SessionPrune, SessionRename, SessionRetag, SessionState, SessionStore, SessionUnlabel,
-    SessionUnpin, TranscriptRecord, TranscriptStore,
+    SessionPrune, SessionRename, SessionRetag, SessionSelectorCheck, SessionState, SessionStore,
+    SessionUnlabel, SessionUnpin, TranscriptRecord, TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -491,6 +491,15 @@ impl RuntimeEngine {
     pub fn unpin_session(&self, target: &str) -> Result<SessionUnpin, String> {
         let resolved = self.resolve_selector(target)?;
         self.store.unpin(&resolved).map_err(|err| err.to_string())
+    }
+
+    pub fn check_session_selector(
+        &self,
+        selector: &str,
+    ) -> Result<SessionSelectorCheck, String> {
+        self.store
+            .check_selector(selector)
+            .map_err(|err| err.to_string())
     }
 
     fn comparison_side_for(&self, id: &str) -> Result<SessionComparisonSide, String> {
