@@ -7,7 +7,8 @@ use harness_session::{
     SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionPin, SessionPinEntry,
     SessionPrune, SessionRename, SessionRetag, SessionSelectorCheck, SessionState, SessionStore,
     SessionTranscriptContext, SessionTranscriptFind, SessionTranscriptRange,
-    SessionTranscriptTail, SessionUnlabel, SessionUnpin, TranscriptRecord, TranscriptStore,
+    SessionTranscriptTail, SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin,
+    TranscriptRecord, TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -543,6 +544,16 @@ impl RuntimeEngine {
     ) -> Result<SessionTranscriptContext, String> {
         self.store
             .context_transcript(selector, turn, before, after)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn turn_show_session_transcript(
+        &self,
+        selector: &str,
+        turn: usize,
+    ) -> Result<SessionTranscriptTurnShow, String> {
+        self.store
+            .turn_show_transcript(selector, turn)
             .map_err(|err| err.to_string())
     }
 

@@ -451,6 +451,17 @@ pub struct SessionTranscriptContext {
     pub entries: Vec<TranscriptEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptTurnShow {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub turn_index: usize,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub entry: TranscriptEntry,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -687,6 +698,39 @@ impl SessionStore {
             total_entries: total,
             returned_entries: entries.len(),
             entries,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return the
+    /// single persisted transcript entry whose `turn_index == turn` for the
+    /// matching session. The persisted transcript is not mutated. Empty
+    /// transcripts and out-of-range `turn` values fail cleanly and deterministically
+    /// with `TranscriptTurnOutOfRange` rather than masking the miss as a
+    /// silent empty result, because the command's contract is to return
+    /// exactly one entry. Preserves existing selector failure semantics
+    /// unchanged (`SessionNotFound` / `AmbiguousLabel` / `MalformedSelector`).
+    pub fn turn_show_transcript(
+        &self,
+        selector: &str,
+        turn: usize,
+    ) -> Result<SessionTranscriptTurnShow, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total = transcript.entries.len();
+        if turn >= total {
+            return Err(RuntimeError::TranscriptTurnOutOfRange(format!(
+                "turn {turn} not found in transcript of length {total}"
+            )));
+        }
+        let entry = transcript.entries[turn].clone();
+        Ok(SessionTranscriptTurnShow {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            turn_index: turn,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries: total,
+            entry,
         })
     }
 
