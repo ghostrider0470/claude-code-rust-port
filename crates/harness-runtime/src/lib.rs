@@ -6,8 +6,9 @@ use harness_session::{
     SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
     SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionPin, SessionPinEntry,
     SessionPrune, SessionRename, SessionRetag, SessionSelectorCheck, SessionState, SessionStore,
-    SessionTranscriptContext, SessionTranscriptFind, SessionTranscriptLastTurn,
-    SessionTranscriptRange, SessionTranscriptTail, SessionTranscriptTurnShow, SessionUnlabel,
+    SessionTranscriptContext, SessionTranscriptFind, SessionTranscriptFirstTurn,
+    SessionTranscriptLastTurn, SessionTranscriptRange, SessionTranscriptTail,
+    SessionTranscriptTurnShow, SessionUnlabel,
     SessionUnpin, TranscriptRecord, TranscriptStore,
 };
 use std::fs;
@@ -563,6 +564,15 @@ impl RuntimeEngine {
     ) -> Result<SessionTranscriptLastTurn, String> {
         self.store
             .last_turn_transcript(selector)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn first_turn_session_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptFirstTurn, String> {
+        self.store
+            .first_turn_transcript(selector)
             .map_err(|err| err.to_string())
     }
 
