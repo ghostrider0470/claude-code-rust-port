@@ -25,6 +25,7 @@ enum CliCommand {
     SessionCompare { left: String, right: String },
     SessionDelete { id: String },
     SessionImport { path: String },
+    SessionFind { query: String },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -88,6 +89,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("import persisted session bundle");
             serde_json::to_string_pretty(&imported).expect("serialize session import")
         }
+        CliCommand::SessionFind { query } => {
+            let results = engine
+                .find_sessions(&query)
+                .expect("search persisted sessions");
+            serde_json::to_string_pretty(&results).expect("serialize session find results")
+        }
     }
 }
 
@@ -104,8 +111,8 @@ mod tests {
     use harness_commands::CommandRegistry;
     use harness_runtime::RuntimeEngine;
     use harness_session::{
-        SessionComparison, SessionDeletion, SessionExport, SessionImport, SessionState,
-        SessionStore, TranscriptRecord,
+        SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionImport,
+        SessionState, SessionStore, TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -914,6 +921,78 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn session_find_matches_readme_example_and_identifies_matched_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let find_output = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+            },
+        );
+
+        let results: Vec<SessionFindResult> =
+            serde_json::from_str(&find_output).expect("parse session-find output");
+        assert_eq!(results.len(), 1, "exactly one persisted session should match");
+        assert_eq!(results[0].session_id.to_string(), session_id);
+        assert_eq!(results[0].matches.len(), 1);
+        assert_eq!(results[0].matches[0].turn_index.0, 0);
+        assert_eq!(results[0].matches[0].prompt.0, "review bash");
+
+        assert_eq!(
+            normalize_bootstrap_example(&find_output, &session_id, &root),
+            readme_output_block("session-find <query>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_find_empty_result_matches_readme_example() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _ = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+
+        let find_output = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "definitely-not-present".to_string(),
+            },
+        );
+
+        let results: Vec<SessionFindResult> =
+            serde_json::from_str(&find_output).expect("parse session-find empty output");
+        assert!(results.is_empty(), "no matches should yield an empty array");
+
+        assert_eq!(
+            find_output,
+            readme_output_block("session-find <unmatched-query>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
 
     #[test]

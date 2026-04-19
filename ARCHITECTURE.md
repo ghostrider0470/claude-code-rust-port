@@ -181,6 +181,7 @@ Session and transcript concerns:
 - `TranscriptRecord` (on-disk transcript format: `session_id`, `created_at_ms`, `updated_at_ms`, ordered `entries`)
 - `SessionExport` (deterministic export bundle: `exported_session_id`, `session`, `transcript`; bundles session state with its transcript for archival, sharing, or debugging; the same shape is the accepted input for `session-import`, closing the loop between export and import)
 - `SessionImport` (deterministic import result: `imported_session_id`, `session_path`, `transcript_path`; records that a bundle was round-tripped back into the store and which local files were written)
+- `SessionFindResult` (deterministic search result: `session_id`, `created_at_ms`, `updated_at_ms`, `message_count`, `persisted_path`, and a `matches` array of `{ turn_index, prompt }` entries; results are produced by `SessionStore::find` in the existing newest-first session ordering and contain only sessions whose persisted transcripts contain the query)
 - `SessionComparison` (deterministic comparison bundle: `left_session_id`, `right_session_id`, `left`, `right`, `differences`; `differences` carries a `same_session` flag plus signed `created_at_ms_delta`, `updated_at_ms_delta`, `message_count_delta`, and `transcript_entry_count_delta` computed as `right - left` so the direction of the comparison is preserved)
 - `SessionStore`
 - recency metadata for persisted sessions (`created_at_ms`) plus activity metadata (`updated_at_ms`) that bumps on resume so `latest` follows the most recently active session
@@ -231,6 +232,7 @@ User-facing CLI:
 - `session-compare <left-id> <right-id>` with `latest` accepted on either side (deterministic JSON comparison bundle that identifies both compared session ids and reports signed deltas for recency/activity metadata and transcript/turn counts)
 - `session-delete <id>` and `session-delete latest` (removes both the session JSON and its sibling transcript JSON; deterministic JSON output identifies the deleted session id and the removed paths, and the command fails cleanly without deleting anything else when the target session does not exist)
 - `session-import <bundle-path>` (imports a persisted session bundle from a JSON file in the `session-export` shape; recreates both the session JSON and its sibling transcript JSON, preserves the imported session id, recency/activity metadata, and transcript `turn_index` ordering, and fails cleanly without overwriting unrelated persisted sessions when the bundle is invalid or the target session id already exists locally)
+- `session-find <query>` (searches persisted local sessions by transcript prompt text without mutating any session state; the query is matched case-insensitively as a substring against each persisted transcript entry; output is a deterministic JSON array of result objects, ordered using the same newest-first session ordering as `sessions`, where each result identifies the matched `session_id` plus recency/activity metadata and a `matches` array of `{ turn_index, prompt }` entries; an empty query and a query with no matches both succeed cleanly with an empty array)
 
 ## Structured Event Model
 
