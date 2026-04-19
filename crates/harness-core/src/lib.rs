@@ -172,6 +172,8 @@ pub enum RuntimeError {
     SessionAlreadyPinned(String),
     #[error("session already unpinned: {0}")]
     SessionAlreadyUnpinned(String),
+    #[error("transcript turn out of range: {0}")]
+    TranscriptTurnOutOfRange(String),
 }
 
 pub fn estimate_tokens(text: &str) -> usize {
