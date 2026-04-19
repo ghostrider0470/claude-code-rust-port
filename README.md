@@ -936,7 +936,7 @@ cargo run -q -p harness-cli -- session-retag label:runtime-review release-candid
 
 ### `session-prune --keep <count>`
 
-Bulk-remove older persisted sessions without touching the newest `<count>`. Ordering matches `sessions` and `session-labels` (most recently updated first, then `created_at_ms`, then `session_id`, then `persisted_path`), so the "newest N" preserved set is the same one every other command surfaces. For each pruned session, both persisted artifacts are removed together: the `.sessions/<session-id>.json` file and the sibling `.sessions/<session-id>.transcript.json`. Preserved sessions are never mutated — their label, transcript entries, transcript ordering, and activity metadata stay exactly as they were. The output uses a deterministic shape: `{ kept_count, pruned_count, removed }`, where `removed` is a JSON array — one entry per pruned session — identifying the pruned `session_id` together with the removed `session_path` and `transcript_path`. If the store already contains `<count>` or fewer sessions the call succeeds cleanly with `removed: []`. `--keep 0` is supported and prunes every persisted session.
+Bulk-remove older persisted sessions without touching the newest `<count>` *prune-eligible* (unpinned) sessions. Pinned sessions are always preserved and are reported under `pinned_preserved_count` / `pinned_preserved` regardless of `<count>` — see [`session-pin <id>`](#session-pin-id). Ordering matches `sessions` and `session-labels` (most recently updated first, then `created_at_ms`, then `session_id`, then `persisted_path`), applied only across the unpinned subset, so the "newest N" preserved set is the same one every other command surfaces after excluding pinned sessions. For each pruned session, both persisted artifacts are removed together: the `.sessions/<session-id>.json` file and the sibling `.sessions/<session-id>.transcript.json`. Preserved sessions are never mutated — their label, pinned flag, transcript entries, transcript ordering, and activity metadata stay exactly as they were. The output uses a deterministic shape: `{ kept_count, pruned_count, pinned_preserved_count, removed, pinned_preserved }`, where `removed` is a JSON array — one entry per pruned session — identifying the pruned `session_id` together with the removed `session_path` and `transcript_path`, and `pinned_preserved` is a JSON array of `session_id` values for every pinned session that was held back from pruning. If the store already contains `<count>` or fewer unpinned sessions the call succeeds cleanly with `removed: []`. `--keep 0` is supported and prunes every unpinned persisted session.
 
 ```bash
 cargo run -q -p harness-cli -- session-prune --keep 1
@@ -946,19 +946,21 @@ cargo run -q -p harness-cli -- session-prune --keep 1
 {
   "kept_count": 1,
   "pruned_count": 1,
+  "pinned_preserved_count": 0,
   "removed": [
     {
       "session_id": "<pruned-session-id>",
       "session_path": ".sessions/<pruned-session-id>.json",
       "transcript_path": ".sessions/<pruned-session-id>.transcript.json"
     }
-  ]
+  ],
+  "pinned_preserved": []
 }
 ```
 
 ### `session-prune <no-op>`
 
-When the store already contains `<count>` or fewer persisted sessions, `session-prune` returns a deterministic empty `removed` array instead of erroring, so scripts can treat "already within the retention budget" and "just ran a prune" identically.
+When the store already contains `<count>` or fewer unpinned persisted sessions, `session-prune` returns a deterministic empty `removed` array instead of erroring, so scripts can treat "already within the retention budget" and "just ran a prune" identically. Pinned sessions do not count against the retention budget and surface through `pinned_preserved_count` / `pinned_preserved`.
 
 ```bash
 cargo run -q -p harness-cli -- session-prune --keep 10
@@ -968,7 +970,71 @@ cargo run -q -p harness-cli -- session-prune --keep 10
 {
   "kept_count": 1,
   "pruned_count": 0,
-  "removed": []
+  "pinned_preserved_count": 0,
+  "removed": [],
+  "pinned_preserved": []
+}
+```
+
+### `session-pin <id>`
+
+Mark a persisted session as pinned so it is permanently excluded from `session-prune`'s retention-based removal regardless of the `--keep` budget. Pin preserves the existing `session_id`, does not mutate transcript entries or transcript ordering, and does not bump `updated_at_ms` so newest-first ordering stays activity-based. Messages, usage, and labels are untouched. The output uses a deterministic shape: `{ pinned_session_id, pinned }`, where `pinned_session_id` confirms which session was targeted and `pinned` is `true` on success. Older unpinned sessions stay byte-compatible: the `pinned` field is only serialized into persisted JSON after a session has actually been pinned. Attempting to pin a session that is already pinned fails cleanly with `session already pinned: <session-id>` so the operation never silently no-ops, and unknown session ids or selectors still surface as `session not found`.
+
+```bash
+cargo run -q -p harness-cli -- session-pin <session-id>
+```
+
+```json
+{
+  "pinned_session_id": "<session-id>",
+  "pinned": true
+}
+```
+
+### `session-pin latest` / `session-pin label:<name>`
+
+`latest` resolves to the most recently active persisted session, and `label:<name>` is accepted here too, mirroring every other single-session command via the shared selector path. `session-pin` pairs with [`session-prune`](#session-prune---keep-count) so the sessions you care about can be pinned once and then stay safe from any future prune invocation.
+
+```bash
+cargo run -q -p harness-cli -- session-pin latest
+cargo run -q -p harness-cli -- session-pin label:runtime-review
+```
+
+```json
+{
+  "pinned_session_id": "<session-id>",
+  "pinned": true
+}
+```
+
+### `session-unpin <id>`
+
+Clear the pinned flag on a persisted session so it becomes eligible for `session-prune` again. Unpin preserves the existing `session_id`, does not mutate transcript entries or transcript ordering, and does not bump `updated_at_ms` so newest-first ordering stays activity-based. Messages, usage, and labels are untouched. The output uses a deterministic shape: `{ unpinned_session_id, pinned }`, where `unpinned_session_id` confirms which session was targeted and `pinned` is `false` on success. Older unpinned sessions stay backward-compatible: once the pin is cleared, the session no longer serializes a `pinned` field at all (no `null`, no `false`). Attempting to unpin a session that is not pinned fails cleanly with `session already unpinned: <session-id>` so the operation never silently no-ops, and unknown session ids or selectors still surface as `session not found`.
+
+```bash
+cargo run -q -p harness-cli -- session-unpin <session-id>
+```
+
+```json
+{
+  "unpinned_session_id": "<session-id>",
+  "pinned": false
+}
+```
+
+### `session-unpin latest` / `session-unpin label:<name>`
+
+`latest` resolves to the most recently active persisted session, and `label:<name>` is accepted here too, mirroring every other single-session command. This closes the pin-management loop alongside `session-pin` and `session-prune`: pin the sessions you want to keep, prune the rest on a budget, and unpin anything that no longer needs that protection — all without disturbing transcript history.
+
+```bash
+cargo run -q -p harness-cli -- session-unpin latest
+cargo run -q -p harness-cli -- session-unpin label:runtime-review
+```
+
+```json
+{
+  "unpinned_session_id": "<session-id>",
+  "pinned": false
 }
 ```
 
@@ -1024,9 +1090,12 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::retag` behavior: trims surrounding whitespace on the new label, rejects empty and whitespace-only labels with `InvalidLabel`, preserves the existing `session_id` and does not mutate transcript entries, transcript ordering, messages, or `updated_at_ms`, surfaces `SessionAlreadyLabeled` when the requested label normalizes to the same effective value already persisted, surfaces `SessionAlreadyUnlabeled` when the target session has no label to replace, and surfaces `SessionNotFound` cleanly for unknown session ids
 - `harness-runtime` `retag_session` behavior: accepts explicit ids, the `latest` selector, and `label:<name>` (via the shared `resolve_selector` path), delegates to the store, and surfaces unknown selectors, already-unlabeled sessions, and same-effective-label attempts as distinct, descriptive errors without mutating any other persisted state
 - README-backed CLI coverage for `session-retag <id> <label>`, `session-retag latest <label>`, and `session-retag label:<old-name> <new-name>` confirming the output identifies the resolved `retagged_session_id`, the `previous_label`, and the `applied_label`, that the retag leaves transcript entries and ordering untouched, that `updated_at_ms` is not bumped, that `session-labels` reflects the new label while transcript/session content and ordering stay unchanged, and that a same-effective-label request fails cleanly without touching persisted state
-- `harness-session` `SessionStore::prune` behavior: preserves the newest `<keep>` persisted sessions using the same newest-first ordering as `list()` (`updated_at_ms` → `created_at_ms` → `session_id` → `persisted_path`), removes both persisted artifacts (`.sessions/<id>.json` and `.sessions/<id>.transcript.json`) together for every older session, reports `kept_count`, `pruned_count`, and a deterministic `removed` array identifying each pruned `session_id` together with the removed session and transcript paths, leaves preserved sessions' labels, transcript entries, transcript ordering, and activity metadata untouched, supports `--keep 0` to prune every persisted session, returns a clean empty `removed` listing when the store already contains `<= keep` sessions, and returns a clean empty listing for a missing root directory
-- `harness-runtime` `prune_sessions` behavior: delegates to the store so the CLI surface shares ordering, removal semantics, and deterministic output with `SessionStore::prune`, and continues to surface preserved sessions newest-first through `list_sessions` after a prune
-- README-backed CLI coverage for `session-prune --keep <count>` and `session-prune <no-op>` confirming the output exposes `kept_count`, `pruned_count`, and a `removed` array with `session_id`, `session_path`, and `transcript_path` per pruned entry, preserves the newest `<count>` sessions in the subsequent `sessions` listing, removes both persisted artifacts for every older session, and returns a deterministic empty `removed` array when the store already contains `<= count` persisted sessions
+- `harness-session` `SessionStore::prune` behavior: preserves the newest `<keep>` *prune-eligible (unpinned)* persisted sessions using the same newest-first ordering as `list()` (`updated_at_ms` → `created_at_ms` → `session_id` → `persisted_path`) applied only across unpinned sessions, removes both persisted artifacts (`.sessions/<id>.json` and `.sessions/<id>.transcript.json`) together for every older unpinned session, reports `kept_count`, `pruned_count`, `pinned_preserved_count`, a deterministic `removed` array identifying each pruned `session_id` together with the removed session and transcript paths, and a deterministic `pinned_preserved` array listing every pinned session that was held back, leaves preserved sessions' labels, pinned flag, transcript entries, transcript ordering, and activity metadata untouched, supports `--keep 0` to prune every unpinned persisted session, returns a clean empty `removed` listing when the store already contains `<= keep` unpinned sessions, and returns a clean empty listing for a missing root directory
+- `harness-runtime` `prune_sessions` behavior: delegates to the store so the CLI surface shares ordering, removal semantics, pinned-preservation, and deterministic output with `SessionStore::prune`, and continues to surface preserved sessions newest-first through `list_sessions` after a prune
+- README-backed CLI coverage for `session-prune --keep <count>` and `session-prune <no-op>` confirming the output exposes `kept_count`, `pruned_count`, `pinned_preserved_count`, a `removed` array with `session_id`, `session_path`, and `transcript_path` per pruned entry, and a `pinned_preserved` array of rescued session ids, preserves the newest `<count>` unpinned sessions in the subsequent `sessions` listing, removes both persisted artifacts for every older unpinned session, and returns a deterministic empty `removed` array when the store already contains `<= count` unpinned persisted sessions
+- `harness-session` `SessionStore::pin` / `SessionStore::unpin` behavior: sets / clears the persisted `pinned` flag while preserving the existing `session_id`, `created_at_ms`, `updated_at_ms`, messages, usage, label, and transcript entries/ordering; reports `SessionAlreadyPinned` / `SessionAlreadyUnpinned` cleanly when the operation would be a no-op, reports `SessionNotFound` for missing ids, and keeps persisted JSON free of a `pinned: false` field so older unpinned sessions stay byte-compatible
+- `harness-runtime` `pin_session` / `unpin_session` behavior: accepts explicit ids, the `latest` selector, and `label:<name>` via the shared `resolve_selector` path, delegates to the store, and surfaces unknown selectors / already-pinned / already-unpinned states as distinct, descriptive errors without mutating any other persisted state; pinned sessions survive `prune_sessions` regardless of `<keep>` and are reported via `pinned_preserved_count` / `pinned_preserved`
+- README-backed CLI coverage for `session-pin <id>`, `session-pin latest`, `session-pin label:<name>`, `session-unpin <id>`, `session-unpin latest`, and `session-unpin label:<name>` confirming the output identifies the resolved `pinned_session_id` / `unpinned_session_id` and the resulting pinned state, that pin/unpin leave transcript entries and ordering untouched, that `updated_at_ms` is not bumped (newest-first ordering stays activity-based), that the persisted JSON carries `pinned: true` only while pinned and omits the field entirely after unpin, and CLI coverage for `session-prune --keep <count>` with a pinned session confirming the pinned session is excluded from pruning and surfaces via `pinned_preserved` while other older unpinned sessions are still removed deterministically
 
 Validation commands:
 
@@ -1094,3 +1163,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI label selectors (`label:<name>`) for persisted sessions accepted anywhere a single persisted session id is accepted (`session-show`, `transcript-show`, `resume`, `session-export`, `session-delete`, `session-fork`, `session-rename`, and either side of `session-compare`); raw session ids and `latest` keep their existing behavior, machine-readable JSON outputs continue to surface the actual resolved `session_id`, and unknown labels, ambiguous labels (more than one persisted session sharing the same label), and malformed selectors (`label:` with no name) all fail cleanly with distinct diagnostics; activity-based newest-first ordering is unchanged and mixed labeled/unlabeled stores stay backward-compatible
 - [x] CLI session-unlabel for persisted sessions (`session-unlabel <id>`, `session-unlabel latest`, and `session-unlabel label:<name>`) that removes only the persisted `label` metadata field while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits a deterministic `{ unlabeled_session_id, removed_label }` shape, fails cleanly for unknown sessions/selectors and for attempts to unlabel a session that is already unlabeled, and keeps older unlabeled sessions backward-compatible by not serializing a null/empty label field after removal
 - [x] CLI session-retag for persisted sessions (`session-retag <id> <label>`, `session-retag latest <label>`, and `session-retag label:<old-name> <new-name>`) that atomically replaces the persisted `label` metadata field while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits a deterministic `{ retagged_session_id, previous_label, applied_label }` shape, fails cleanly for unknown sessions/selectors, empty/whitespace-only labels, attempts to retag a session that carries no label, and attempts where the requested label normalizes to the same effective value already present, and keeps older unlabeled sessions backward-compatible by only serializing the label field when present
+- [x] CLI session-pin / session-unpin for persisted sessions (`session-pin <id>`, `session-pin latest`, `session-pin label:<name>`, `session-unpin <id>`, `session-unpin latest`, and `session-unpin label:<name>`) that toggle a deterministic `pinned` flag on session metadata while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits deterministic `{ pinned_session_id, pinned }` / `{ unpinned_session_id, pinned }` shapes, keeps older unpinned sessions backward-compatible by only serializing the `pinned` field when the session is actually pinned, surfaces the `pinned` flag through `sessions`, `session-show`, `session-export`, `session-compare`, and `session-labels`, and makes `session-prune --keep <count>` skip pinned sessions — apply newest-first ordering only across the unpinned subset and report rescued pins via a new `pinned_preserved_count` and `pinned_preserved` pair on the prune output

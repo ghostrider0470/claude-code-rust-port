@@ -50,6 +50,10 @@ impl TranscriptStore {
     }
 }
 
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
     pub session_id: SessionId,
@@ -61,6 +65,8 @@ pub struct SessionState {
     pub usage: UsageSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
 }
 
 impl Default for SessionState {
@@ -73,6 +79,7 @@ impl Default for SessionState {
             messages: Vec::new(),
             usage: UsageSummary::default(),
             label: None,
+            pinned: false,
         }
     }
 }
@@ -126,6 +133,8 @@ pub struct SessionComparisonSide {
     pub updated_at_ms: u64,
     pub message_count: usize,
     pub transcript_entry_count: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
 }
 
 impl SessionComparisonSide {
@@ -136,6 +145,7 @@ impl SessionComparisonSide {
             updated_at_ms: session.updated_at_ms,
             message_count: session.messages.len(),
             transcript_entry_count: transcript.entries.len(),
+            pinned: session.pinned,
         }
     }
 }
@@ -246,7 +256,21 @@ pub struct SessionPruneRemoval {
 pub struct SessionPrune {
     pub kept_count: usize,
     pub pruned_count: usize,
+    pub pinned_preserved_count: usize,
     pub removed: Vec<SessionPruneRemoval>,
+    pub pinned_preserved: Vec<SessionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPin {
+    pub pinned_session_id: SessionId,
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUnpin {
+    pub unpinned_session_id: SessionId,
+    pub pinned: bool,
 }
 
 pub fn normalize_label(raw: &str) -> Result<String, RuntimeError> {
@@ -301,6 +325,8 @@ pub struct SessionListing {
     pub updated_at_ms: u64,
     pub message_count: usize,
     pub persisted_path: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,6 +343,8 @@ pub struct SessionFindResult {
     pub message_count: usize,
     pub persisted_path: String,
     pub matches: Vec<SessionFindMatch>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +355,8 @@ pub struct SessionLabelEntry {
     pub updated_at_ms: u64,
     pub message_count: usize,
     pub persisted_path: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -478,20 +508,33 @@ impl SessionStore {
         })
     }
 
-    /// Preserve the newest `keep` persisted sessions (using the same
-    /// newest-first ordering as `list()`) and remove every older persisted
-    /// session together with its sibling transcript JSON. Preserved sessions
-    /// are never mutated — their label, transcript entries, and activity
-    /// metadata are untouched. If the store already contains `<= keep`
-    /// sessions the call succeeds cleanly with an empty `removed` list.
-    /// `keep == 0` is supported and prunes every persisted session.
+    /// Preserve the newest `keep` prune-eligible (unpinned) persisted sessions
+    /// using the same newest-first ordering as `list()` and remove every older
+    /// unpinned persisted session together with its sibling transcript JSON.
+    /// Pinned sessions are always preserved and reported under
+    /// `pinned_preserved` / `pinned_preserved_count` regardless of `keep`.
+    /// Preserved sessions are never mutated — their label, pinned flag,
+    /// transcript entries, and activity metadata are untouched. If the store
+    /// already contains `<= keep` unpinned sessions the call succeeds cleanly
+    /// with an empty `removed` list. `keep == 0` is supported and prunes every
+    /// unpinned persisted session.
     pub fn prune(&self, keep: usize) -> Result<SessionPrune, RuntimeError> {
         let listings = self.list()?;
-        let total = listings.len();
-        let kept_count = total.min(keep);
+
+        let mut pinned_preserved: Vec<SessionId> = Vec::new();
+        let mut eligible: Vec<SessionListing> = Vec::new();
+        for listing in listings {
+            if listing.pinned {
+                pinned_preserved.push(listing.session_id.clone());
+            } else {
+                eligible.push(listing);
+            }
+        }
+
+        let kept_count = eligible.len().min(keep);
 
         let mut removed = Vec::new();
-        for listing in listings.into_iter().skip(kept_count) {
+        for listing in eligible.into_iter().skip(kept_count) {
             let id = listing.session_id.to_string();
             let session_path = self.root.join(format!("{id}.json"));
             let transcript_path = self.transcript_path(&id);
@@ -512,7 +555,51 @@ impl SessionStore {
         Ok(SessionPrune {
             kept_count,
             pruned_count: removed.len(),
+            pinned_preserved_count: pinned_preserved.len(),
             removed,
+            pinned_preserved,
+        })
+    }
+
+    /// Mark a persisted session as pinned without touching its `session_id`,
+    /// `updated_at_ms`, label, messages, or transcript entries. Pinned sessions
+    /// are preserved by `prune` regardless of the retention budget. Fails
+    /// cleanly when the session is already pinned so the operation never
+    /// silently no-ops.
+    pub fn pin(&self, session_id: &str) -> Result<SessionPin, RuntimeError> {
+        let mut session = self.load(session_id)?;
+        if session.pinned {
+            return Err(RuntimeError::SessionAlreadyPinned(
+                session.session_id.to_string(),
+            ));
+        }
+        session.pinned = true;
+        self.save(&session)?;
+
+        Ok(SessionPin {
+            pinned_session_id: session.session_id,
+            pinned: true,
+        })
+    }
+
+    /// Clear the pinned flag on a persisted session without touching its
+    /// `session_id`, `updated_at_ms`, label, messages, or transcript entries.
+    /// Fails cleanly when the session is not currently pinned so the operation
+    /// never silently no-ops. Keeps persisted JSON free of an explicit
+    /// `pinned: false` field so older sessions stay byte-compatible.
+    pub fn unpin(&self, session_id: &str) -> Result<SessionUnpin, RuntimeError> {
+        let mut session = self.load(session_id)?;
+        if !session.pinned {
+            return Err(RuntimeError::SessionAlreadyUnpinned(
+                session.session_id.to_string(),
+            ));
+        }
+        session.pinned = false;
+        self.save(&session)?;
+
+        Ok(SessionUnpin {
+            unpinned_session_id: session.session_id,
+            pinned: false,
         })
     }
 
@@ -581,6 +668,7 @@ impl SessionStore {
             messages: forked_messages,
             usage: source_session.usage.add_turn(prompt.as_str(), "turn forked"),
             label: None,
+            pinned: false,
         };
 
         let mut forked_entries = source_transcript.entries.clone();
@@ -708,6 +796,7 @@ impl SessionStore {
                 message_count: listing.message_count,
                 persisted_path: listing.persisted_path,
                 matches,
+                pinned: listing.pinned,
             });
         }
 
@@ -738,6 +827,7 @@ impl SessionStore {
                 updated_at_ms: listing.updated_at_ms,
                 message_count: listing.message_count,
                 persisted_path: listing.persisted_path,
+                pinned: session.pinned,
             });
         }
         Ok(entries)
@@ -778,6 +868,7 @@ impl SessionStore {
                 updated_at_ms: session.updated_at_ms,
                 message_count: session.messages.len(),
                 persisted_path: path.display().to_string(),
+                pinned: session.pinned,
             });
         }
 
@@ -828,6 +919,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
 
         let saved_path = store.save(&session).expect("save session state");
@@ -874,6 +966,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         let newer = SessionState {
             session_id: SessionId::new(),
@@ -885,6 +978,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
 
         store.save(&older).expect("save older session");
@@ -950,6 +1044,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         let newer = SessionState {
             session_id: SessionId::new(),
@@ -961,6 +1056,7 @@ mod tests {
                 output_tokens: 1,
             },
             label: None,
+            pinned: false,
         };
 
         store.save(&older).expect("save older session");
@@ -987,6 +1083,7 @@ mod tests {
                 output_tokens: 4,
             },
             label: None,
+            pinned: false,
         };
 
         let mut transcript = TranscriptStore::default();
@@ -1046,6 +1143,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         let newer = SessionState {
             session_id: SessionId::new(),
@@ -1057,6 +1155,7 @@ mod tests {
                 output_tokens: 1,
             },
             label: None,
+            pinned: false,
         };
 
         let mut older_transcript = TranscriptStore::default();
@@ -1093,6 +1192,7 @@ mod tests {
                 output_tokens: 4,
             },
             label: None,
+            pinned: false,
         };
 
         let mut transcript = TranscriptStore::default();
@@ -1142,6 +1242,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         let right_state = SessionState {
             session_id: SessionId::new(),
@@ -1157,6 +1258,7 @@ mod tests {
                 output_tokens: 6,
             },
             label: None,
+            pinned: false,
         };
 
         let mut left_transcript = TranscriptStore::default();
@@ -1218,6 +1320,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("review bash"));
@@ -1262,6 +1365,7 @@ mod tests {
                 output_tokens: 1,
             },
             label: None,
+            pinned: false,
         };
         let mut keeper_transcript = TranscriptStore::default();
         keeper_transcript.append(Prompt::new("keep me"));
@@ -1301,6 +1405,7 @@ mod tests {
                 output_tokens: 4,
             },
             label: None,
+            pinned: false,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("review bash"));
@@ -1366,6 +1471,7 @@ mod tests {
                 output_tokens: 1,
             },
             label: None,
+            pinned: false,
         };
         let mut keeper_transcript = TranscriptStore::default();
         keeper_transcript.append(Prompt::new("keep me"));
@@ -1410,6 +1516,7 @@ mod tests {
                 output_tokens: 1,
             },
             label: None,
+            pinned: false,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("one"));
@@ -1451,6 +1558,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         let record = TranscriptRecord {
             session_id: session.session_id.clone(),
@@ -1494,6 +1602,7 @@ mod tests {
                 output_tokens: 4,
             },
             label: None,
+            pinned: false,
         };
         let mut older_transcript = TranscriptStore::default();
         older_transcript.append(Prompt::new("review bash"));
@@ -1510,6 +1619,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         let mut newer_transcript = TranscriptStore::default();
         newer_transcript.append(Prompt::new("review tools"));
@@ -1525,6 +1635,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         let mut unrelated_transcript = TranscriptStore::default();
         unrelated_transcript.append(Prompt::new("summary please"));
@@ -1591,6 +1702,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("review bash"));
@@ -1628,6 +1740,7 @@ mod tests {
                 output_tokens: 4,
             },
             label: None,
+            pinned: false,
         };
         let mut source_transcript = TranscriptStore::default();
         source_transcript.append(Prompt::new("review bash"));
@@ -1746,6 +1859,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         let second = SessionState {
             session_id: SessionId::new(),
@@ -1757,6 +1871,7 @@ mod tests {
                 output_tokens: 1,
             },
             label: None,
+            pinned: false,
         };
 
         store.save(&first).expect("save first session");
@@ -1802,6 +1917,7 @@ mod tests {
                 output_tokens: 4,
             },
             label: None,
+            pinned: false,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("review bash"));
@@ -1859,6 +1975,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         store.save(&session).expect("save session");
         let id = session.session_id.to_string();
@@ -1908,6 +2025,7 @@ mod tests {
                 output_tokens: 4,
             },
             label: Some("runtime-review".to_string()),
+            pinned: false,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("review bash"));
@@ -1973,6 +2091,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         store.save(&session).expect("save session");
         let id = session.session_id.to_string();
@@ -2014,6 +2133,7 @@ mod tests {
                 output_tokens: 4,
             },
             label: Some("runtime-review".to_string()),
+            pinned: false,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("review bash"));
@@ -2068,6 +2188,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: Some("runtime-review".to_string()),
+            pinned: false,
         };
         store.save(&labeled).expect("save labeled session");
         let labeled_id = labeled.session_id.to_string();
@@ -2102,6 +2223,7 @@ mod tests {
                 output_tokens: 2,
             },
             label: None,
+            pinned: false,
         };
         store.save(&unlabeled).expect("save unlabeled session");
         let unlabeled_id = unlabeled.session_id.to_string();
@@ -2187,6 +2309,7 @@ mod tests {
             messages: vec![Prompt::new("review bash")],
             usage: harness_core::UsageSummary::default(),
             label: Some("runtime-review".to_string()),
+            pinned: false,
         };
         let unlabeled = SessionState {
             session_id: SessionId::new(),
@@ -2195,6 +2318,7 @@ mod tests {
             messages: vec![Prompt::new("summary")],
             usage: harness_core::UsageSummary::default(),
             label: None,
+            pinned: false,
         };
         store.save(&labeled).expect("save labeled");
         store.save(&unlabeled).expect("save unlabeled");
@@ -2244,6 +2368,7 @@ mod tests {
             messages: vec![Prompt::new("a")],
             usage: harness_core::UsageSummary::default(),
             label: Some("dup".to_string()),
+            pinned: false,
         };
         let second = SessionState {
             session_id: SessionId::new(),
@@ -2252,6 +2377,7 @@ mod tests {
             messages: vec![Prompt::new("b")],
             usage: harness_core::UsageSummary::default(),
             label: Some("dup".to_string()),
+            pinned: false,
         };
         store.save(&first).expect("save first");
         store.save(&second).expect("save second");
@@ -2304,6 +2430,7 @@ mod tests {
             messages: vec![Prompt::new("review bash")],
             usage: harness_core::UsageSummary::default(),
             label: Some("runtime-review".to_string()),
+            pinned: false,
         };
         let newer_labeled = SessionState {
             session_id: SessionId::new(),
@@ -2312,6 +2439,7 @@ mod tests {
             messages: vec![Prompt::new("summary please")],
             usage: harness_core::UsageSummary::default(),
             label: Some("release-candidate".to_string()),
+            pinned: false,
         };
         let unlabeled = SessionState {
             session_id: SessionId::new(),
@@ -2320,6 +2448,7 @@ mod tests {
             messages: vec![Prompt::new("no label here")],
             usage: harness_core::UsageSummary::default(),
             label: None,
+            pinned: false,
         };
 
         store.save(&older_labeled).expect("save older labeled");
@@ -2384,6 +2513,7 @@ mod tests {
             messages: vec![Prompt::new("alpha")],
             usage: harness_core::UsageSummary::default(),
             label: Some("dup".to_string()),
+            pinned: false,
         };
         let later = SessionState {
             session_id: SessionId::new(),
@@ -2392,6 +2522,7 @@ mod tests {
             messages: vec![Prompt::new("beta")],
             usage: harness_core::UsageSummary::default(),
             label: Some("dup".to_string()),
+            pinned: false,
         };
 
         store.save(&earlier).expect("save earlier");
@@ -2429,6 +2560,7 @@ mod tests {
             messages: vec![Prompt::new("no label")],
             usage: harness_core::UsageSummary::default(),
             label: None,
+            pinned: false,
         };
         store.save(&unlabeled).expect("save unlabeled");
         let entries = store.list_labels().expect("list labels");
@@ -2462,6 +2594,7 @@ mod tests {
             messages: vec![Prompt::new("seed prompt")],
             usage: harness_core::UsageSummary::default(),
             label: label.map(|value| value.to_string()),
+            pinned: false,
         };
         store.save(&session).expect("save seeded session");
 
@@ -2643,5 +2776,214 @@ mod tests {
         assert_eq!(outcome.kept_count, 0);
         assert_eq!(outcome.pruned_count, 0);
         assert!(outcome.removed.is_empty());
+    }
+
+    #[test]
+    fn pin_sets_flag_preserves_id_transcript_and_activity_metadata() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let seeded = seed_session(&store, 1_700_000_000_050, None);
+        let original_transcript = store
+            .load_transcript(&seeded.session_id.to_string())
+            .expect("load transcript");
+
+        let outcome = store
+            .pin(&seeded.session_id.to_string())
+            .expect("pin session");
+        assert_eq!(outcome.pinned_session_id, seeded.session_id);
+        assert!(outcome.pinned, "pin result must report pinned: true");
+
+        let reloaded = store
+            .load(&seeded.session_id.to_string())
+            .expect("reload pinned session");
+        assert!(reloaded.pinned, "pinned flag must persist across reload");
+        // Identity and activity metadata are untouched.
+        assert_eq!(reloaded.session_id, seeded.session_id);
+        assert_eq!(reloaded.created_at_ms, seeded.created_at_ms);
+        assert_eq!(reloaded.updated_at_ms, seeded.updated_at_ms);
+        assert_eq!(reloaded.messages, seeded.messages);
+        assert_eq!(reloaded.usage, seeded.usage);
+        assert_eq!(reloaded.label, seeded.label);
+        // Transcript bytes are byte-identical.
+        let after_transcript = store
+            .load_transcript(&seeded.session_id.to_string())
+            .expect("reload transcript");
+        assert_eq!(after_transcript, original_transcript);
+
+        // Already-pinned sessions reject a second pin without mutation.
+        let second = store.pin(&seeded.session_id.to_string());
+        assert!(matches!(second, Err(RuntimeError::SessionAlreadyPinned(_))));
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn unpin_clears_flag_and_omits_field_from_persisted_json() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let seeded = seed_session(&store, 1_700_000_000_050, None);
+        store
+            .pin(&seeded.session_id.to_string())
+            .expect("pin for unpin round-trip");
+
+        let outcome = store
+            .unpin(&seeded.session_id.to_string())
+            .expect("unpin session");
+        assert_eq!(outcome.unpinned_session_id, seeded.session_id);
+        assert!(!outcome.pinned, "unpin result must report pinned: false");
+
+        // Backward-compatible serialization: once pin is cleared, persisted JSON
+        // no longer contains a `pinned` field at all (no null, no `false`).
+        let persisted_path = root.join(format!("{}.json", seeded.session_id));
+        let persisted_json =
+            fs::read_to_string(&persisted_path).expect("read persisted session json");
+        assert!(
+            !persisted_json.contains("\"pinned\""),
+            "unpinned persisted JSON must not carry a pinned field: {persisted_json}"
+        );
+
+        // Unpinning an already-unpinned session is a clean, descriptive error.
+        let second = store.unpin(&seeded.session_id.to_string());
+        assert!(matches!(
+            second,
+            Err(RuntimeError::SessionAlreadyUnpinned(_))
+        ));
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn unpinned_session_state_serializes_without_pinned_field_for_backward_compat() {
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_000,
+            messages: vec![Prompt::new("hi")],
+            usage: harness_core::UsageSummary::default(),
+            label: None,
+            pinned: false,
+        };
+        let serialized = serde_json::to_string(&session).expect("serialize session");
+        assert!(
+            !serialized.contains("\"pinned\""),
+            "unpinned default session must not serialize `pinned`: {serialized}"
+        );
+
+        // Deserialization round-trips cleanly from legacy JSON that has no pinned field.
+        let legacy = serde_json::to_string(&serde_json::json!({
+            "session_id": session.session_id,
+            "created_at_ms": session.created_at_ms,
+            "updated_at_ms": session.updated_at_ms,
+            "messages": session.messages,
+            "usage": session.usage,
+        }))
+        .expect("serialize legacy session");
+        let reloaded: SessionState =
+            serde_json::from_str(&legacy).expect("deserialize legacy session");
+        assert!(!reloaded.pinned, "missing pinned field must default to false");
+    }
+
+    #[test]
+    fn prune_skips_pinned_sessions_and_reports_pinned_preserved_deterministically() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        // Newest-first ordering: c > b > a.
+        let a = seed_session(&store, 1_700_000_000_000, None);
+        let b = seed_session(&store, 1_700_000_000_100, None);
+        let c = seed_session(&store, 1_700_000_000_200, None);
+
+        // Pin the *oldest* session. Without pinning, `keep=1` would preserve
+        // only `c` and delete both `a` and `b`. Pinning `a` must rescue it.
+        store
+            .pin(&a.session_id.to_string())
+            .expect("pin oldest session");
+
+        let outcome = store.prune(1).expect("prune keep=1 with pin");
+
+        // Unpinned sessions: newest-first ordering keeps `c` and prunes `b`.
+        assert_eq!(outcome.kept_count, 1, "kept_count counts unpinned only");
+        assert_eq!(outcome.pruned_count, 1);
+        assert_eq!(outcome.removed.len(), 1);
+        assert_eq!(outcome.removed[0].session_id, b.session_id);
+
+        // Pinned preservation is surfaced deterministically.
+        assert_eq!(outcome.pinned_preserved_count, 1);
+        assert_eq!(outcome.pinned_preserved, vec![a.session_id.clone()]);
+
+        // Pinned oldest session is still on disk, with transcript and pin flag
+        // intact; newest unpinned session is preserved; middle one is gone.
+        let reloaded_pinned = store
+            .load(&a.session_id.to_string())
+            .expect("pinned session must survive prune");
+        assert!(reloaded_pinned.pinned);
+        assert_eq!(reloaded_pinned, SessionState { pinned: true, ..a.clone() });
+        assert!(root
+            .join(format!("{}.transcript.json", a.session_id))
+            .exists());
+        assert!(store.load(&c.session_id.to_string()).is_ok());
+        assert!(store.load(&b.session_id.to_string()).is_err());
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn prune_within_budget_after_excluding_pins_returns_empty_removed_with_pinned_surfaced() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let a = seed_session(&store, 1_700_000_000_000, None);
+        let b = seed_session(&store, 1_700_000_000_100, None);
+        store
+            .pin(&a.session_id.to_string())
+            .expect("pin session a");
+        store
+            .pin(&b.session_id.to_string())
+            .expect("pin session b");
+
+        // Every session is pinned, so prune with any budget is a clean no-op on
+        // removed, but both pins surface via pinned_preserved.
+        let outcome = store.prune(0).expect("prune keep=0 with all pinned");
+        assert_eq!(outcome.kept_count, 0);
+        assert_eq!(outcome.pruned_count, 0);
+        assert!(outcome.removed.is_empty());
+        assert_eq!(outcome.pinned_preserved_count, 2);
+        // Newest-first ordering propagates into pinned_preserved (b is newer).
+        assert_eq!(
+            outcome.pinned_preserved,
+            vec![b.session_id.clone(), a.session_id.clone()]
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn list_and_list_labels_surface_pinned_state() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let unpinned = seed_session(&store, 1_700_000_000_000, Some("runtime-review"));
+        let pinned = seed_session(&store, 1_700_000_000_100, Some("release-candidate"));
+        store
+            .pin(&pinned.session_id.to_string())
+            .expect("pin newest");
+
+        let listings = store.list().expect("list sessions");
+        // Newest-first ordering; pinned flag surfaces per listing.
+        assert_eq!(listings.len(), 2);
+        assert_eq!(listings[0].session_id, pinned.session_id);
+        assert!(listings[0].pinned);
+        assert_eq!(listings[1].session_id, unpinned.session_id);
+        assert!(!listings[1].pinned);
+
+        let labels = store.list_labels().expect("list labels");
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].session_id, pinned.session_id);
+        assert!(labels[0].pinned);
+        assert!(!labels[1].pinned);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
     }
 }

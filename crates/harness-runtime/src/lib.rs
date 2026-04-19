@@ -4,8 +4,9 @@ use harness_core::{
 };
 use harness_session::{
     SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
-    SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionPrune, SessionRename,
-    SessionRetag, SessionState, SessionStore, SessionUnlabel, TranscriptRecord, TranscriptStore,
+    SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionPin, SessionPrune,
+    SessionRename, SessionRetag, SessionState, SessionStore, SessionUnlabel, SessionUnpin,
+    TranscriptRecord, TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -476,6 +477,16 @@ impl RuntimeEngine {
 
     pub fn prune_sessions(&self, keep: usize) -> Result<SessionPrune, String> {
         self.store.prune(keep).map_err(|err| err.to_string())
+    }
+
+    pub fn pin_session(&self, target: &str) -> Result<SessionPin, String> {
+        let resolved = self.resolve_selector(target)?;
+        self.store.pin(&resolved).map_err(|err| err.to_string())
+    }
+
+    pub fn unpin_session(&self, target: &str) -> Result<SessionUnpin, String> {
+        let resolved = self.resolve_selector(target)?;
+        self.store.unpin(&resolved).map_err(|err| err.to_string())
     }
 
     fn comparison_side_for(&self, id: &str) -> Result<SessionComparisonSide, String> {
@@ -1698,6 +1709,113 @@ mod tests {
             .load_session(&second.session.session_id.to_string())
             .expect("reload preserved");
         assert_eq!(reloaded.messages.len(), 1);
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn pin_session_accepts_explicit_id_latest_and_label_selectors() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let older = engine.bootstrap(Prompt::new("older")).expect("bootstrap older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = engine.bootstrap(Prompt::new("newer")).expect("bootstrap newer");
+        let older_id = older.session.session_id.to_string();
+        let newer_id = newer.session.session_id.to_string();
+
+        // Label the older session so `label:` selector resolution is exercised.
+        engine
+            .rename_session(&older_id, "pin-by-label")
+            .expect("label older session");
+
+        // 1) Pin by explicit id.
+        let by_id = engine.pin_session(&older_id).expect("pin by id");
+        assert_eq!(by_id.pinned_session_id.to_string(), older_id);
+        assert!(by_id.pinned);
+        engine
+            .unpin_session(&older_id)
+            .expect("unpin to reuse for latest path");
+
+        // 2) Pin by `latest`.
+        let by_latest = engine.pin_session("latest").expect("pin latest");
+        assert_eq!(by_latest.pinned_session_id.to_string(), newer_id);
+        assert!(by_latest.pinned);
+        engine.unpin_session("latest").expect("unpin latest");
+
+        // 3) Pin by `label:<name>` resolves to the labeled (older) session.
+        let by_label = engine
+            .pin_session("label:pin-by-label")
+            .expect("pin by label");
+        assert_eq!(by_label.pinned_session_id.to_string(), older_id);
+        let unpin_by_label = engine
+            .unpin_session("label:pin-by-label")
+            .expect("unpin by label");
+        assert_eq!(unpin_by_label.unpinned_session_id.to_string(), older_id);
+        assert!(!unpin_by_label.pinned);
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn prune_sessions_skips_pinned_entries_via_runtime_pipeline() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let first = engine.bootstrap(Prompt::new("first")).expect("bootstrap 1");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = engine.bootstrap(Prompt::new("second")).expect("bootstrap 2");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let third = engine.bootstrap(Prompt::new("third")).expect("bootstrap 3");
+
+        // Pin the oldest session. With keep=1, normally only `third` would survive;
+        // the pin must rescue `first` too, and `second` must still be pruned
+        // because it is the oldest remaining unpinned session.
+        engine
+            .pin_session(&first.session.session_id.to_string())
+            .expect("pin oldest");
+
+        let outcome = engine.prune_sessions(1).expect("prune keep 1 with pin");
+        assert_eq!(outcome.kept_count, 1);
+        assert_eq!(outcome.pruned_count, 1);
+        assert_eq!(
+            outcome.removed[0].session_id.to_string(),
+            second.session.session_id.to_string()
+        );
+        assert_eq!(outcome.pinned_preserved_count, 1);
+        assert_eq!(
+            outcome.pinned_preserved,
+            vec![first.session.session_id.clone()]
+        );
+
+        let remaining: Vec<String> = engine
+            .list_sessions()
+            .expect("list after prune")
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                third.session.session_id.to_string(),
+                first.session.session_id.to_string(),
+            ],
+            "newest-first ordering across survivors, pinned first-session rescued"
+        );
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }
