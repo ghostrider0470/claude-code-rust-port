@@ -222,6 +222,12 @@ pub struct SessionRename {
     pub applied_label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUnlabel {
+    pub unlabeled_session_id: SessionId,
+    pub removed_label: String,
+}
+
 pub fn normalize_label(raw: &str) -> Result<String, RuntimeError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -557,6 +563,23 @@ impl SessionStore {
         Ok(SessionRename {
             renamed_session_id: session.session_id,
             applied_label,
+        })
+    }
+
+    /// Remove the persisted `label` from a session without touching its
+    /// `session_id`, transcript entries, or `updated_at_ms`. Fails cleanly
+    /// when the session exists but carries no label so callers can
+    /// distinguish this from "unknown id" without silently no-oping.
+    pub fn unlabel(&self, session_id: &str) -> Result<SessionUnlabel, RuntimeError> {
+        let mut session = self.load(session_id)?;
+        let removed_label = session.label.take().ok_or_else(|| {
+            RuntimeError::SessionAlreadyUnlabeled(session.session_id.to_string())
+        })?;
+        self.save(&session)?;
+
+        Ok(SessionUnlabel {
+            unlabeled_session_id: session.session_id,
+            removed_label,
         })
     }
 
@@ -1774,6 +1797,126 @@ mod tests {
 
         let missing = SessionId::new().to_string();
         match store.rename(&missing, "anything") {
+            Err(RuntimeError::SessionNotFound(reported)) => assert_eq!(reported, missing),
+            other => panic!("expected SessionNotFound for missing id, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unlabel_clears_label_preserves_id_transcript_and_activity_metadata() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash"), Prompt::new("summary please")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 4,
+                output_tokens: 4,
+            },
+            label: Some("runtime-review".to_string()),
+        };
+        let mut transcript = TranscriptStore::default();
+        transcript.append(Prompt::new("review bash"));
+        transcript.append(Prompt::new("summary please"));
+        let record = TranscriptRecord::from_session(&session, &transcript);
+
+        store.save(&session).expect("save session");
+        store.save_transcript(&record).expect("save transcript");
+
+        let id = session.session_id.to_string();
+        let unlabeled = store.unlabel(&id).expect("unlabel persisted session");
+
+        assert_eq!(unlabeled.unlabeled_session_id, session.session_id);
+        assert_eq!(unlabeled.removed_label, "runtime-review");
+
+        let reloaded = store.load(&id).expect("reload unlabeled session");
+        assert_eq!(reloaded.session_id, session.session_id);
+        assert!(
+            reloaded.label.is_none(),
+            "unlabel must clear the persisted label"
+        );
+        assert_eq!(
+            reloaded.created_at_ms, session.created_at_ms,
+            "unlabel must preserve created_at_ms"
+        );
+        assert_eq!(
+            reloaded.updated_at_ms, session.updated_at_ms,
+            "unlabel must preserve updated_at_ms so newest-first ordering stays activity-based"
+        );
+        assert_eq!(reloaded.messages, session.messages);
+        assert_eq!(reloaded.usage, session.usage);
+
+        let reloaded_transcript = store
+            .load_transcript(&id)
+            .expect("reload transcript after unlabel");
+        assert_eq!(
+            reloaded_transcript, record,
+            "unlabel must not mutate transcript entries or ordering"
+        );
+
+        let persisted_body =
+            fs::read_to_string(root.join(format!("{id}.json"))).expect("read session json");
+        assert!(
+            !persisted_body.contains("\"label\""),
+            "persisted session json must not serialize a null/empty label field: {persisted_body}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn unlabel_already_unlabeled_session_fails_without_touching_store() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+            label: None,
+        };
+        store.save(&session).expect("save session");
+        let id = session.session_id.to_string();
+
+        match store.unlabel(&id) {
+            Err(RuntimeError::SessionAlreadyUnlabeled(reported)) => {
+                assert_eq!(reported, id, "error must surface the resolved session id");
+            }
+            other => panic!("expected SessionAlreadyUnlabeled, got {other:?}"),
+        }
+
+        let reloaded = store
+            .load(&id)
+            .expect("reload session after failed unlabel");
+        assert!(
+            reloaded.label.is_none(),
+            "failed unlabel must leave the session unlabeled"
+        );
+        assert_eq!(
+            reloaded.updated_at_ms, session.updated_at_ms,
+            "failed unlabel must not bump activity metadata"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn unlabel_missing_session_reports_session_not_found() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let missing = SessionId::new().to_string();
+        match store.unlabel(&missing) {
             Err(RuntimeError::SessionNotFound(reported)) => assert_eq!(reported, missing),
             other => panic!("expected SessionNotFound for missing id, got {other:?}"),
         }

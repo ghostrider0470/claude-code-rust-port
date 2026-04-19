@@ -164,6 +164,8 @@ pub enum RuntimeError {
     AmbiguousLabel(String),
     #[error("malformed session selector: {0}")]
     MalformedSelector(String),
+    #[error("session already unlabeled: {0}")]
+    SessionAlreadyUnlabeled(String),
 }
 
 pub fn estimate_tokens(text: &str) -> usize {

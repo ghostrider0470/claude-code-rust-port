@@ -837,6 +837,37 @@ Failure modes are deterministic and distinct so the CLI surfaces the right diagn
 
 Machine-readable JSON outputs continue to identify the actual resolved `session_id` values rather than echoing the selector string, so downstream tooling can rely on the resolved id even when the user typed `label:<name>` or `latest`. Older unlabeled sessions and mixed labeled/unlabeled stores keep working — sessions without a label are transparently skipped during label resolution.
 
+### `session-unlabel <id>`
+
+Remove the persisted label from a session without touching its `session_id`, transcript entries, transcript ordering, or `updated_at_ms` — newest-first ordering stays activity-based. The output uses a deterministic shape: `{ unlabeled_session_id, removed_label }`, where `unlabeled_session_id` confirms which session was targeted and `removed_label` is the label that was cleared. Older unlabeled sessions remain backward-compatible: once a label is removed, the session no longer serializes a `label` field at all (no `null`, no empty string). Attempting to unlabel a session that is already unlabeled fails cleanly with `session already unlabeled: <session-id>` so the operation never silently no-ops, and unknown session ids or selectors still surface as `session not found`.
+
+```bash
+cargo run -q -p harness-cli -- session-unlabel <session-id>
+```
+
+```json
+{
+  "unlabeled_session_id": "<session-id>",
+  "removed_label": "runtime-review"
+}
+```
+
+### `session-unlabel latest`
+
+`latest` resolves to the most recently active persisted session, and `label:<name>` is accepted here too, mirroring every other single-session command. This closes the label-management loop alongside `session-rename`, `session-labels`, and `label:<name>` selectors: rename a session, discover labels, target by label, and remove a label when it is no longer useful — all without disturbing transcript history.
+
+```bash
+cargo run -q -p harness-cli -- session-unlabel latest
+cargo run -q -p harness-cli -- session-unlabel label:runtime-review
+```
+
+```json
+{
+  "unlabeled_session_id": "<session-id>",
+  "removed_label": "runtime-review"
+}
+```
+
 ### `session-labels`
 
 List every persisted session that currently carries a label, without touching session state or transcripts. Output is a deterministic JSON array ordered using the same newest-first ordering as `sessions` (most recently updated first, then by `created_at_ms`, then by `session_id`, then by `persisted_path`). Each entry exposes `label`, `session_id`, `created_at_ms`, `updated_at_ms`, `message_count`, and `persisted_path` so the listing is useful from the terminal without a follow-up `session-show`. Unlabeled sessions are omitted. Duplicate labels stay visible as separate rows — the listing makes ambiguity discoverable before a `label:<name>` selector would fail with `AmbiguousLabel`.
@@ -916,6 +947,9 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::list_labels` behavior: emits one entry per labeled persisted session, uses the same newest-first ordering as `list()`, omits unlabeled sessions, keeps duplicate labels visible as separate rows so ambiguity is discoverable, returns a clean empty vector when no persisted session carries a label, and never mutates persisted state
 - `harness-runtime` `list_session_labels` behavior: delegates to the store so the CLI surface shares ordering and omission semantics with `list_labels`, and surfaces an empty listing cleanly when no persisted session is labeled
 - README-backed CLI coverage for `session-labels` and `session-labels <empty-store>` confirming the listing is newest-first, exposes `label`, `session_id`, recency metadata, `message_count`, and `persisted_path`, omits unlabeled sessions, keeps duplicate labels as separate rows, and returns a deterministic empty JSON array when no persisted session is labeled
+- `harness-session` `SessionStore::unlabel` behavior: clears the persisted `label` field while preserving the existing `session_id`, `created_at_ms`, `updated_at_ms`, messages, usage, and transcript entries/ordering, reports `SessionAlreadyUnlabeled` cleanly for a session that carries no label, reports `SessionNotFound` for missing ids, and keeps persisted JSON free of a `null`/empty `label` field so older unlabeled sessions stay backward-compatible
+- `harness-runtime` `unlabel_session` behavior: accepts explicit ids, the `latest` selector, and `label:<name>` (via the shared `resolve_selector` path), delegates to the store, and surfaces unknown selectors and already-unlabeled sessions as distinct, descriptive errors without mutating any other persisted state
+- README-backed CLI coverage for `session-unlabel <id>`, `session-unlabel latest`, and `session-unlabel label:<name>` confirming the output identifies the resolved `unlabeled_session_id` and the `removed_label`, that the unlabel leaves transcript entries and ordering untouched, that `updated_at_ms` is not bumped, that the unlabeled session disappears from `session-labels` while transcript/session content stays unchanged, and that an already-unlabeled session fails cleanly without touching persisted state
 
 Validation commands:
 
@@ -981,3 +1015,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI session rename for persisted sessions (`session-rename <id> <label>` and `session-rename latest <label>`) that attaches a trimmed, non-empty human-readable label to persisted session metadata while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits a deterministic `{ renamed_session_id, applied_label }` shape, fails cleanly for unknown sessions and empty/whitespace-only labels, and keeps older unlabeled sessions readable by only emitting the label field once a session has actually been labeled
 - [x] CLI session-labels for persisted sessions (`session-labels`) that lists every persisted session carrying a label without mutating session state, emits a deterministic JSON array ordered using the existing newest-first persisted-session ordering, exposes `label`, `session_id`, recency metadata (`created_at_ms`, `updated_at_ms`), `message_count`, and `persisted_path` per entry, omits unlabeled sessions, keeps duplicate labels visible as separate rows so ambiguity is discoverable before a `label:<name>` selector would fail, and returns a clean empty JSON array when no persisted session carries a label
 - [x] CLI label selectors (`label:<name>`) for persisted sessions accepted anywhere a single persisted session id is accepted (`session-show`, `transcript-show`, `resume`, `session-export`, `session-delete`, `session-fork`, `session-rename`, and either side of `session-compare`); raw session ids and `latest` keep their existing behavior, machine-readable JSON outputs continue to surface the actual resolved `session_id`, and unknown labels, ambiguous labels (more than one persisted session sharing the same label), and malformed selectors (`label:` with no name) all fail cleanly with distinct diagnostics; activity-based newest-first ordering is unchanged and mixed labeled/unlabeled stores stay backward-compatible
+- [x] CLI session-unlabel for persisted sessions (`session-unlabel <id>`, `session-unlabel latest`, and `session-unlabel label:<name>`) that removes only the persisted `label` metadata field while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits a deterministic `{ unlabeled_session_id, removed_label }` shape, fails cleanly for unknown sessions/selectors and for attempts to unlabel a session that is already unlabeled, and keeps older unlabeled sessions backward-compatible by not serializing a null/empty label field after removal

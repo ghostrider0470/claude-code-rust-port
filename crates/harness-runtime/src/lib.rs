@@ -5,7 +5,7 @@ use harness_core::{
 use harness_session::{
     SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
     SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionRename, SessionState,
-    SessionStore, TranscriptRecord, TranscriptStore,
+    SessionStore, SessionUnlabel, TranscriptRecord, TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -452,6 +452,13 @@ impl RuntimeEngine {
         let source = self.load_session(target)?;
         self.store
             .rename(&source.session_id.to_string(), label)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn unlabel_session(&self, target: &str) -> Result<SessionUnlabel, String> {
+        let resolved = self.resolve_selector(target)?;
+        self.store
+            .unlabel(&resolved)
             .map_err(|err| err.to_string())
     }
 
