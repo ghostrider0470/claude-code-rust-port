@@ -192,6 +192,12 @@ impl SessionComparison {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDeletion {
+    pub deleted_session_id: SessionId,
+    pub removed_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListing {
     pub session_id: SessionId,
     pub created_at_ms: u64,
@@ -275,6 +281,31 @@ impl SessionStore {
         self.root.join(format!("{session_id}.transcript.json"))
     }
 
+    pub fn delete(&self, session_id: &str) -> Result<SessionDeletion, RuntimeError> {
+        let session_path = self.root.join(format!("{}.json", session_id));
+        if !session_path.exists() {
+            return Err(RuntimeError::SessionNotFound(session_id.to_string()));
+        }
+
+        let session = self.load(session_id)?;
+
+        let transcript_path = self.transcript_path(session_id);
+        let mut removed_paths = Vec::new();
+
+        fs::remove_file(&session_path).map_err(|err| RuntimeError::Io(err.to_string()))?;
+        removed_paths.push(session_path.display().to_string());
+
+        if transcript_path.exists() {
+            fs::remove_file(&transcript_path).map_err(|err| RuntimeError::Io(err.to_string()))?;
+            removed_paths.push(transcript_path.display().to_string());
+        }
+
+        Ok(SessionDeletion {
+            deleted_session_id: session.session_id,
+            removed_paths,
+        })
+    }
+
     pub fn list(&self) -> Result<Vec<SessionListing>, RuntimeError> {
         if !self.root.exists() {
             return Ok(Vec::new());
@@ -332,7 +363,7 @@ mod tests {
         SessionComparison, SessionComparisonSide, SessionExport, SessionState, SessionStore,
         TranscriptRecord, TranscriptStore,
     };
-    use harness_core::{Prompt, SessionId};
+    use harness_core::{Prompt, RuntimeError, SessionId};
     use std::collections::BTreeMap;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -722,6 +753,87 @@ mod tests {
         let roundtrip: SessionComparison =
             serde_json::from_str(&serialized).expect("deserialize comparison");
         assert_eq!(roundtrip, comparison);
+    }
+
+    #[test]
+    fn delete_removes_session_and_transcript_and_reports_paths() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+        };
+        let mut transcript = TranscriptStore::default();
+        transcript.append(Prompt::new("review bash"));
+        let record = TranscriptRecord::from_session(&session, &transcript);
+
+        let session_path = store.save(&session).expect("save session");
+        let transcript_path = store.save_transcript(&record).expect("save transcript");
+
+        let id = session.session_id.to_string();
+        let deletion = store.delete(&id).expect("delete session");
+
+        assert_eq!(deletion.deleted_session_id, session.session_id);
+        assert_eq!(
+            deletion.removed_paths,
+            vec![
+                session_path.display().to_string(),
+                transcript_path.display().to_string(),
+            ]
+        );
+        assert!(!session_path.exists());
+        assert!(!transcript_path.exists());
+
+        match store.load(&id) {
+            Err(RuntimeError::SessionNotFound(missing)) => assert_eq!(missing, id),
+            other => panic!("expected SessionNotFound after delete, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn delete_missing_session_errors_without_touching_sibling_sessions() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+        let keeper = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("keep me")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+        let mut keeper_transcript = TranscriptStore::default();
+        keeper_transcript.append(Prompt::new("keep me"));
+        let keeper_record = TranscriptRecord::from_session(&keeper, &keeper_transcript);
+
+        let keeper_path = store.save(&keeper).expect("save keeper session");
+        let keeper_transcript_path = store
+            .save_transcript(&keeper_record)
+            .expect("save keeper transcript");
+
+        let missing = SessionId::new().to_string();
+        match store.delete(&missing) {
+            Err(RuntimeError::SessionNotFound(reported)) => assert_eq!(reported, missing),
+            other => panic!("expected SessionNotFound for missing id, got {other:?}"),
+        }
+
+        assert!(keeper_path.exists(), "sibling session must not be deleted");
+        assert!(
+            keeper_transcript_path.exists(),
+            "sibling transcript must not be deleted"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
     }
 
     #[test]

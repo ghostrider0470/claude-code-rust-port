@@ -49,7 +49,7 @@ The first meaningful milestone is:
 - tool and command registries
 - deterministic routing
 - runtime turn processor with structured events
-- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, session export, and session comparison
+- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, session export, session comparison, and session deletion
 
 See:
 
@@ -658,6 +658,42 @@ cargo run -q -p harness-cli -- session-compare latest latest
 }
 ```
 
+### `session-delete <id>`
+
+Remove one persisted session cleanly. Deletion takes both persisted artifacts for the session in one call: the session JSON (`.sessions/<session-id>.json`) and its sibling transcript JSON (`.sessions/<session-id>.transcript.json`). The output uses a deterministic shape: `{ deleted_session_id, removed_paths }`, where `deleted_session_id` confirms which session was targeted and `removed_paths` lists the files that were actually removed in the order the store removed them (session JSON first, then transcript). If the target session does not exist the command fails without deleting anything else.
+
+```bash
+cargo run -q -p harness-cli -- session-delete <session-id>
+```
+
+```json
+{
+  "deleted_session_id": "<session-id>",
+  "removed_paths": [
+    ".sessions/<session-id>.json",
+    ".sessions/<session-id>.transcript.json"
+  ]
+}
+```
+
+### `session-delete latest`
+
+`latest` resolves to the most recently active persisted session, mirroring how `session-show latest`, `transcript-show latest`, `session-export latest`, and `session-compare latest latest` resolve their targets. This is the ergonomic way to drop the session you just created without having to copy its id by hand.
+
+```bash
+cargo run -q -p harness-cli -- session-delete latest
+```
+
+```json
+{
+  "deleted_session_id": "<session-id>",
+  "removed_paths": [
+    ".sessions/<session-id>.json",
+    ".sessions/<session-id>.transcript.json"
+  ]
+}
+```
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -683,6 +719,9 @@ Current protected Rust surface:
 - `harness-session` `SessionComparison` bundle: pairs two sides with shared recency/activity metadata, reports signed `right - left` deltas (including negative deltas when order is reversed), exposes a `same_session` flag, and serializes deterministically
 - `harness-runtime` `compare_sessions` behavior: resolves explicit ids and the `latest` selector on either side, computes deltas against persisted session state plus transcripts, and treats a self-comparison as `same_session: true` with zero deltas
 - README-backed CLI coverage for `session-compare <left-id> <right-id>` and `session-compare latest latest` confirming the output identifies both compared session ids and that a `latest latest` self-comparison reports `same_session: true` with every delta equal to `0`
+- `harness-session` `SessionStore::delete` behavior: removes both the session JSON and its sibling transcript JSON, reports the removed paths in deterministic order, and fails with `SessionNotFound` without touching sibling sessions when the target does not exist
+- `harness-runtime` `delete_session` behavior: resolves the `latest` selector to the most recently active persisted session, removes both persisted artifacts for that session, and leaves untouched sessions intact
+- README-backed CLI coverage for `session-delete <id>` and `session-delete latest` confirming the output identifies the deleted session id, lists the removed paths in `session.json` then `transcript.json` order, and that the session disappears from subsequent listings
 
 Validation commands:
 
@@ -741,3 +780,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] Persisted transcript files per session and CLI transcript inspection (`transcript-show <id>` and `transcript-show latest`)
 - [x] CLI session export for persisted session bundles (`session-export <id>` and `session-export latest`) in a deterministic JSON shape packaging session state plus transcript
 - [x] CLI session comparison for persisted sessions (`session-compare <left-id> <right-id>` with `latest` accepted on either side) in a deterministic JSON shape that identifies both compared session ids and reports signed deltas for recency metadata and transcript/turn counts
+- [x] CLI session deletion for persisted sessions (`session-delete <id>` and `session-delete latest`) that removes both the session JSON and its sibling transcript JSON in one call, with deterministic JSON output identifying the deleted session id plus the removed paths, and a clean failure when the target session does not exist

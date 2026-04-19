@@ -228,6 +228,7 @@ User-facing CLI:
 - `transcript show <id>` and `transcript show latest` (machine-readable JSON transcript inspection that restates the owning session id and preserves turn ordering)
 - `session-export <id>` and `session-export latest` (deterministic JSON export bundle that packages session state plus transcript together; output confirms the exported session id and preserves turn ordering)
 - `session-compare <left-id> <right-id>` with `latest` accepted on either side (deterministic JSON comparison bundle that identifies both compared session ids and reports signed deltas for recency/activity metadata and transcript/turn counts)
+- `session-delete <id>` and `session-delete latest` (removes both the session JSON and its sibling transcript JSON; deterministic JSON output identifies the deleted session id and the removed paths, and the command fails cleanly without deleting anything else when the target session does not exist)
 
 ## Structured Event Model
 
