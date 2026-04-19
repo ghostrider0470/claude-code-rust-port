@@ -45,6 +45,10 @@ enum CliCommand {
         #[arg(long, default_value_t = DEFAULT_TRANSCRIPT_TAIL_COUNT)]
         count: usize,
     },
+    TranscriptFind {
+        selector: String,
+        query: String,
+    },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -176,6 +180,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("tail persisted session transcript");
             serde_json::to_string_pretty(&tail).expect("serialize transcript tail")
         }
+        CliCommand::TranscriptFind { selector, query } => {
+            let find = engine
+                .find_in_session_transcript(&selector, &query)
+                .expect("search persisted session transcript");
+            serde_json::to_string_pretty(&find).expect("serialize transcript find")
+        }
     }
 }
 
@@ -194,8 +204,9 @@ mod tests {
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
         SessionImport, SessionLabelEntry, SessionPin, SessionPinEntry, SessionPrune, SessionRename,
-        SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionTranscriptTail,
-        SessionUnlabel, SessionUnpin, TranscriptRecord, DEFAULT_TRANSCRIPT_TAIL_COUNT,
+        SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionTranscriptFind,
+        SessionTranscriptTail, SessionUnlabel, SessionUnpin, TranscriptRecord,
+        DEFAULT_TRANSCRIPT_TAIL_COUNT,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -3284,6 +3295,227 @@ mod tests {
 
         let err = engine
             .tail_session_transcript("label:", 5)
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_raw_id_returns_case_insensitive_turn_ordered_matches() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(
+            &engine,
+            &id,
+            &["add summary", "review tools", "final polish"],
+        );
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptFind {
+                selector: id.clone(),
+                query: "REVIEW".to_string(),
+            },
+        );
+        let find: SessionTranscriptFind =
+            serde_json::from_str(&output).expect("parse transcript-find output");
+
+        assert_eq!(find.selector, id);
+        assert_eq!(find.resolved_session_id.to_string(), id);
+        assert_eq!(find.query, "REVIEW");
+        assert_eq!(find.total_entries, 4);
+        assert_eq!(find.match_count, 2);
+        let matched_prompts: Vec<&str> =
+            find.matches.iter().map(|m| m.prompt.0.as_str()).collect();
+        assert_eq!(matched_prompts, vec!["Review bash runtime", "review tools"]);
+        let matched_indices: Vec<usize> =
+            find.matches.iter().map(|m| m.turn_index.0).collect();
+        assert_eq!(matched_indices, vec![0, 2]);
+
+        let after_transcript = engine.load_transcript(&id).expect("reload after find");
+        assert_eq!(after_transcript, before_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older review");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer start");
+        extend_transcript(&engine, &newer, &["newer review step"]);
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptFind {
+                selector: "latest".to_string(),
+                query: "review".to_string(),
+            },
+        );
+        let find: SessionTranscriptFind =
+            serde_json::from_str(&output).expect("parse transcript-find latest output");
+
+        assert_eq!(find.selector, "latest");
+        assert_eq!(find.resolved_session_id.to_string(), newer);
+        assert_eq!(find.total_entries, 2);
+        assert_eq!(find.match_count, 1);
+        assert_eq!(find.matches.len(), 1);
+        assert_eq!(find.matches[0].turn_index.0, 1);
+        assert_eq!(find.matches[0].prompt.0, "newer review step");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled review");
+        extend_transcript(&engine, &id, &["second review", "unrelated step"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for find");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptFind {
+                selector: "label:runtime-review".to_string(),
+                query: "review".to_string(),
+            },
+        );
+        let find: SessionTranscriptFind =
+            serde_json::from_str(&output).expect("parse transcript-find label output");
+
+        assert_eq!(find.selector, "label:runtime-review");
+        assert_eq!(find.resolved_session_id.to_string(), id);
+        assert_eq!(find.total_entries, 3);
+        assert_eq!(find.match_count, 2);
+        let matched_prompts: Vec<&str> =
+            find.matches.iter().map(|m| m.prompt.0.as_str()).collect();
+        assert_eq!(matched_prompts, vec!["labeled review", "second review"]);
+        let matched_indices: Vec<usize> =
+            find.matches.iter().map(|m| m.turn_index.0).collect();
+        assert_eq!(matched_indices, vec![0, 1]);
+
+        let reloaded = engine.load_session(&id).expect("reload after find");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_no_match_query_returns_empty_matches_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt"]);
+
+        let find = engine
+            .find_in_session_transcript(&id, "definitely-not-present")
+            .expect("no-match query should succeed");
+
+        assert_eq!(find.selector, id);
+        assert_eq!(find.resolved_session_id.to_string(), id);
+        assert_eq!(find.query, "definitely-not-present");
+        assert_eq!(find.total_entries, 2);
+        assert_eq!(find.match_count, 0);
+        assert!(find.matches.is_empty());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_empty_query_returns_empty_matches_without_erroring() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt"]);
+
+        let find = engine
+            .find_in_session_transcript(&id, "")
+            .expect("empty query should succeed");
+
+        assert_eq!(find.query, "");
+        assert_eq!(find.total_entries, 2);
+        assert_eq!(find.match_count, 0);
+        assert!(find.matches.is_empty());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .find_in_session_transcript("00000000-0000-0000-0000-000000000000", "anything")
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .find_in_session_transcript("label:nonexistent", "anything")
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        assert!(engine.load_session(&anchor).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine.rename_session(&first, "duplicate").expect("label first");
+        engine.rename_session(&second, "duplicate").expect("label second");
+
+        let err = engine
+            .find_in_session_transcript("label:duplicate", "anything")
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .find_in_session_transcript("label:", "anything")
             .expect_err("empty label should fail");
         assert!(
             err.contains("malformed session selector"),
