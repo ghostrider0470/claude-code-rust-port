@@ -28,6 +28,7 @@ enum CliCommand {
     SessionFind { query: String },
     SessionFork { id: String, prompt: String },
     SessionRename { id: String, label: String },
+    SessionLabels,
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -109,6 +110,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("rename persisted session");
             serde_json::to_string_pretty(&renamed).expect("serialize session rename")
         }
+        CliCommand::SessionLabels => {
+            let labels = engine
+                .list_session_labels()
+                .expect("list persisted session labels");
+            serde_json::to_string_pretty(&labels).expect("serialize session labels")
+        }
     }
 }
 
@@ -126,7 +133,8 @@ mod tests {
     use harness_runtime::RuntimeEngine;
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
-        SessionImport, SessionRename, SessionState, SessionStore, TranscriptRecord,
+        SessionImport, SessionLabelEntry, SessionRename, SessionState, SessionStore,
+        TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -1480,6 +1488,209 @@ mod tests {
         assert!(
             malformed.unwrap_err().contains("malformed session selector"),
             "malformed-selector error must mention malformed selector"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_labels_matches_readme_example_and_orders_newest_first_omits_unlabeled_and_keeps_duplicates_separate() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Three persisted sessions: only two end up labeled, and the newest
+        // of those is labeled second so the listing must flip activity order.
+        let older_out = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let older_id = serde_json::from_str::<serde_json::Value>(&older_out)
+            .expect("parse older bootstrap")["session"]["session_id"]
+            .as_str()
+            .expect("older session id")
+            .to_string();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let middle_out = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "no label here".to_string(),
+            },
+        );
+        let middle_id = serde_json::from_str::<serde_json::Value>(&middle_out)
+            .expect("parse middle bootstrap")["session"]["session_id"]
+            .as_str()
+            .expect("middle session id")
+            .to_string();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let newest_out = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "summary please".to_string(),
+            },
+        );
+        let newest_id = serde_json::from_str::<serde_json::Value>(&newest_out)
+            .expect("parse newest bootstrap")["session"]["session_id"]
+            .as_str()
+            .expect("newest session id")
+            .to_string();
+
+        // Only label the older and the newest; middle stays unlabeled.
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: older_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: newest_id.clone(),
+                label: "release-candidate".to_string(),
+            },
+        );
+
+        let labels_output = render_command(&engine, CliCommand::SessionLabels);
+
+        let entries: Vec<SessionLabelEntry> =
+            serde_json::from_str(&labels_output).expect("parse session-labels output");
+        assert_eq!(entries.len(), 2, "only labeled sessions must appear");
+        assert_eq!(
+            entries[0].session_id.to_string(),
+            newest_id,
+            "newest labeled session must come first"
+        );
+        assert_eq!(entries[0].label, "release-candidate");
+        assert_eq!(entries[1].session_id.to_string(), older_id);
+        assert_eq!(entries[1].label, "runtime-review");
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.session_id.to_string() == middle_id),
+            "unlabeled session must be omitted"
+        );
+
+        // The README example shows the simpler single-labeled-session case, so
+        // re-run against a fresh store to compare deterministic output.
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+        let readme_root = temp_session_root();
+        let readme_engine = temp_engine(&readme_root);
+        let bootstrap_output = render_command(
+            &readme_engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let session_id = serde_json::from_str::<serde_json::Value>(&bootstrap_output)
+            .expect("parse bootstrap")["session"]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        let _ = render_command(
+            &readme_engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+        let labels_output = render_command(&readme_engine, CliCommand::SessionLabels);
+
+        assert_eq!(
+            normalize_bootstrap_example(&labels_output, &session_id, &readme_root),
+            readme_output_block("session-labels", "json")
+        );
+
+        fs::remove_dir_all(&readme_root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_labels_keeps_duplicate_labels_as_separate_rows() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first_out = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "alpha".to_string(),
+            },
+        );
+        let first_id = serde_json::from_str::<serde_json::Value>(&first_out)
+            .expect("parse first bootstrap")["session"]["session_id"]
+            .as_str()
+            .expect("first session id")
+            .to_string();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second_out = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "beta".to_string(),
+            },
+        );
+        let second_id = serde_json::from_str::<serde_json::Value>(&second_out)
+            .expect("parse second bootstrap")["session"]["session_id"]
+            .as_str()
+            .expect("second session id")
+            .to_string();
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: first_id.clone(),
+                label: "dup".to_string(),
+            },
+        );
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: second_id.clone(),
+                label: "dup".to_string(),
+            },
+        );
+
+        let labels_output = render_command(&engine, CliCommand::SessionLabels);
+        let entries: Vec<SessionLabelEntry> =
+            serde_json::from_str(&labels_output).expect("parse session-labels output");
+        assert_eq!(
+            entries.len(),
+            2,
+            "duplicate labels must stay as separate rows, not be collapsed"
+        );
+        assert!(entries.iter().all(|entry| entry.label == "dup"));
+        assert_eq!(entries[0].session_id.to_string(), second_id);
+        assert_eq!(entries[1].session_id.to_string(), first_id);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_labels_empty_store_matches_readme_empty_example() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Truly empty store: no persisted sessions at all.
+        let output = render_command(&engine, CliCommand::SessionLabels);
+        assert_eq!(
+            output,
+            readme_output_block("session-labels <empty-store>", "json"),
+            "empty store must emit the README-backed empty JSON array"
+        );
+
+        // Store with only unlabeled persisted sessions must behave identically.
+        let _ = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "no label".to_string(),
+            },
+        );
+        let output = render_command(&engine, CliCommand::SessionLabels);
+        assert_eq!(
+            output,
+            readme_output_block("session-labels <empty-store>", "json"),
+            "unlabeled-only store must also emit the README-backed empty JSON array"
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");

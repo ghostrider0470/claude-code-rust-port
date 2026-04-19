@@ -292,6 +292,16 @@ pub struct SessionFindResult {
     pub matches: Vec<SessionFindMatch>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionLabelEntry {
+    pub label: String,
+    pub session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub message_count: usize,
+    pub persisted_path: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -590,6 +600,35 @@ impl SessionStore {
         }
 
         Ok(results)
+    }
+
+    /// Enumerate labeled persisted sessions. Order mirrors `list()` (newest
+    /// first by `updated_at_ms`, then `created_at_ms`, then `session_id`, then
+    /// `persisted_path`). Sessions without a label are omitted; duplicate
+    /// labels remain as separate rows so ambiguity is discoverable before a
+    /// `label:<name>` selector would fail. Never mutates persisted state.
+    pub fn list_labels(&self) -> Result<Vec<SessionLabelEntry>, RuntimeError> {
+        let mut entries = Vec::new();
+        for listing in self.list()? {
+            let id = listing.session_id.to_string();
+            let session = match self.load(&id) {
+                Ok(state) => state,
+                Err(RuntimeError::SessionNotFound(_)) => continue,
+                Err(other) => return Err(other),
+            };
+            let Some(label) = session.label.clone() else {
+                continue;
+            };
+            entries.push(SessionLabelEntry {
+                label,
+                session_id: listing.session_id,
+                created_at_ms: listing.created_at_ms,
+                updated_at_ms: listing.updated_at_ms,
+                message_count: listing.message_count,
+                persisted_path: listing.persisted_path,
+            });
+        }
+        Ok(entries)
     }
 
     pub fn list(&self) -> Result<Vec<SessionListing>, RuntimeError> {
@@ -1877,6 +1916,159 @@ mod tests {
                 other => panic!("expected MalformedSelector for {malformed:?}, got {other:?}"),
             }
         }
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn list_labels_orders_newest_first_omits_unlabeled_and_keeps_duplicates_as_separate_rows() {
+        use super::SessionLabelEntry;
+
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        // Three sessions with varied activity. Ordering is driven by
+        // updated_at_ms → created_at_ms → session_id → persisted_path, same as
+        // SessionStore::list.
+        let older_labeled = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_010,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary::default(),
+            label: Some("runtime-review".to_string()),
+        };
+        let newer_labeled = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_050,
+            updated_at_ms: 1_700_000_000_200,
+            messages: vec![Prompt::new("summary please")],
+            usage: harness_core::UsageSummary::default(),
+            label: Some("release-candidate".to_string()),
+        };
+        let unlabeled = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_100,
+            updated_at_ms: 1_700_000_000_300,
+            messages: vec![Prompt::new("no label here")],
+            usage: harness_core::UsageSummary::default(),
+            label: None,
+        };
+
+        store.save(&older_labeled).expect("save older labeled");
+        store.save(&newer_labeled).expect("save newer labeled");
+        store.save(&unlabeled).expect("save unlabeled");
+
+        let entries: Vec<SessionLabelEntry> = store.list_labels().expect("list labels");
+
+        // Unlabeled session must be absent, and the remaining labeled sessions
+        // must appear in newest-first order (newer_labeled before older_labeled).
+        let ids: Vec<String> = entries
+            .iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                newer_labeled.session_id.to_string(),
+                older_labeled.session_id.to_string(),
+            ],
+            "list_labels must omit unlabeled sessions and use newest-first ordering"
+        );
+
+        assert_eq!(entries[0].label, "release-candidate");
+        assert_eq!(entries[0].message_count, 1);
+        assert_eq!(entries[0].updated_at_ms, 1_700_000_000_200);
+        assert_eq!(
+            entries[0].persisted_path,
+            root.join(format!("{}.json", newer_labeled.session_id))
+                .display()
+                .to_string()
+        );
+
+        assert_eq!(entries[1].label, "runtime-review");
+        assert_eq!(entries[1].message_count, 1);
+
+        // Verify list_labels does not mutate persisted state — reloaded state
+        // must match exactly what was saved (including the unlabeled session
+        // staying unlabeled).
+        assert_eq!(
+            store
+                .load(&unlabeled.session_id.to_string())
+                .expect("reload unlabeled")
+                .label,
+            None,
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn list_labels_keeps_duplicate_labels_as_separate_rows_in_newest_first_order() {
+        use super::SessionLabelEntry;
+
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let earlier = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_100,
+            messages: vec![Prompt::new("alpha")],
+            usage: harness_core::UsageSummary::default(),
+            label: Some("dup".to_string()),
+        };
+        let later = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_002,
+            updated_at_ms: 1_700_000_000_300,
+            messages: vec![Prompt::new("beta")],
+            usage: harness_core::UsageSummary::default(),
+            label: Some("dup".to_string()),
+        };
+
+        store.save(&earlier).expect("save earlier");
+        store.save(&later).expect("save later");
+
+        let entries: Vec<SessionLabelEntry> = store.list_labels().expect("list labels");
+
+        // Both rows must appear — ambiguity is discoverable, not collapsed.
+        assert_eq!(entries.len(), 2, "duplicate labels must not be collapsed");
+        assert_eq!(entries[0].label, "dup");
+        assert_eq!(entries[1].label, "dup");
+        assert_eq!(entries[0].session_id.to_string(), later.session_id.to_string());
+        assert_eq!(entries[1].session_id.to_string(), earlier.session_id.to_string());
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn list_labels_returns_empty_vector_for_missing_root_and_for_unlabeled_store() {
+        // Missing root directory should not error — the store must behave the
+        // same as for `list()`: cleanly empty.
+        let missing_root = temp_session_root();
+        let empty_store = SessionStore::new(&missing_root);
+        let empty = empty_store.list_labels().expect("list labels on missing root");
+        assert!(empty.is_empty(), "missing root must yield empty label listing");
+
+        // Store with only unlabeled sessions must also yield a clean empty
+        // listing rather than including the unlabeled sessions.
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+        let unlabeled = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_010,
+            messages: vec![Prompt::new("no label")],
+            usage: harness_core::UsageSummary::default(),
+            label: None,
+        };
+        store.save(&unlabeled).expect("save unlabeled");
+        let entries = store.list_labels().expect("list labels");
+        assert!(
+            entries.is_empty(),
+            "unlabeled-only store must yield empty label listing"
+        );
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
     }
