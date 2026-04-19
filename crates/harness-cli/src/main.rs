@@ -28,6 +28,7 @@ enum CliCommand {
     SessionFind { query: String },
     SessionFork { id: String, prompt: String },
     SessionRename { id: String, label: String },
+    SessionUnlabel { id: String },
     SessionLabels,
 }
 
@@ -110,6 +111,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("rename persisted session");
             serde_json::to_string_pretty(&renamed).expect("serialize session rename")
         }
+        CliCommand::SessionUnlabel { id } => {
+            let unlabeled = engine
+                .unlabel_session(&id)
+                .expect("unlabel persisted session");
+            serde_json::to_string_pretty(&unlabeled).expect("serialize session unlabel")
+        }
         CliCommand::SessionLabels => {
             let labels = engine
                 .list_session_labels()
@@ -134,7 +141,7 @@ mod tests {
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
         SessionImport, SessionLabelEntry, SessionRename, SessionState, SessionStore,
-        TranscriptRecord,
+        SessionUnlabel, TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -1692,6 +1699,261 @@ mod tests {
             readme_output_block("session-labels <empty-store>", "json"),
             "unlabeled-only store must also emit the README-backed empty JSON array"
         );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_unlabel_explicit_id_matches_readme_example_and_clears_label_without_touching_transcript(
+    ) {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let session_before = engine
+            .load_session(&session_id)
+            .expect("load session after rename");
+        let transcript_before = engine
+            .load_transcript(&session_id)
+            .expect("load transcript after rename");
+        assert_eq!(session_before.label.as_deref(), Some("runtime-review"));
+
+        let unlabel_output = render_command(
+            &engine,
+            CliCommand::SessionUnlabel {
+                id: session_id.clone(),
+            },
+        );
+
+        let unlabeled: SessionUnlabel =
+            serde_json::from_str(&unlabel_output).expect("parse session-unlabel output");
+        assert_eq!(unlabeled.unlabeled_session_id.to_string(), session_id);
+        assert_eq!(unlabeled.removed_label, "runtime-review");
+
+        let reloaded = engine
+            .load_session(&session_id)
+            .expect("reload session after unlabel");
+        assert!(
+            reloaded.label.is_none(),
+            "unlabel must clear the persisted label"
+        );
+        assert_eq!(
+            reloaded.updated_at_ms, session_before.updated_at_ms,
+            "unlabel must not bump activity metadata"
+        );
+        assert_eq!(reloaded.messages, session_before.messages);
+
+        let transcript_after = engine
+            .load_transcript(&session_id)
+            .expect("reload transcript after unlabel");
+        assert_eq!(
+            transcript_after, transcript_before,
+            "unlabel must not mutate transcript entries or ordering"
+        );
+
+        let persisted_body = fs::read_to_string(root.join(format!("{session_id}.json")))
+            .expect("read persisted session json");
+        assert!(
+            !persisted_body.contains("\"label\""),
+            "unlabeled session must not serialize a null/empty label field: {persisted_body}"
+        );
+
+        assert_eq!(
+            normalize_session_output(&unlabel_output, &session_id),
+            readme_output_block("session-unlabel <id>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_unlabel_latest_selector_resolves_to_most_recent_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let latest_output = render_command(
+            &engine,
+            CliCommand::SessionUnlabel {
+                id: "latest".to_string(),
+            },
+        );
+        let result: SessionUnlabel =
+            serde_json::from_str(&latest_output).expect("parse latest unlabel output");
+        assert_eq!(result.unlabeled_session_id.to_string(), session_id);
+        assert_eq!(result.removed_label, "runtime-review");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_unlabel_label_selector_resolves_to_labeled_session_and_disappears_from_session_labels(
+    ) {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let transcript_before = engine
+            .load_transcript(&session_id)
+            .expect("load transcript before label-selector unlabel");
+
+        // The labeled session shows up in session-labels before unlabel.
+        let labels_before = render_command(&engine, CliCommand::SessionLabels);
+        let labels_before_array: Vec<SessionLabelEntry> =
+            serde_json::from_str(&labels_before).expect("parse session-labels before");
+        assert_eq!(labels_before_array.len(), 1);
+        assert_eq!(labels_before_array[0].label, "runtime-review");
+
+        let label_output = render_command(
+            &engine,
+            CliCommand::SessionUnlabel {
+                id: "label:runtime-review".to_string(),
+            },
+        );
+        let result: SessionUnlabel =
+            serde_json::from_str(&label_output).expect("parse label-selector unlabel output");
+        assert_eq!(
+            result.unlabeled_session_id.to_string(),
+            session_id,
+            "label selector must resolve to the labeled session id, not the selector string"
+        );
+        assert_eq!(result.removed_label, "runtime-review");
+        assert!(
+            !label_output.contains("label:runtime-review"),
+            "JSON output must surface the resolved session id, not the selector string: {label_output}"
+        );
+
+        // The unlabeled session disappears from session-labels.
+        let labels_after = render_command(&engine, CliCommand::SessionLabels);
+        assert_eq!(
+            labels_after.trim(),
+            "[]",
+            "unlabeled session must disappear from session-labels"
+        );
+
+        // Transcript and session content are unchanged aside from the cleared label.
+        let transcript_after = engine
+            .load_transcript(&session_id)
+            .expect("reload transcript after unlabel");
+        assert_eq!(
+            transcript_after, transcript_before,
+            "unlabel must not mutate transcript entries or ordering"
+        );
+        let reloaded = engine
+            .load_session(&session_id)
+            .expect("reload session after unlabel");
+        assert!(reloaded.label.is_none());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_unlabel_unknown_session_and_already_unlabeled_fail_cleanly_without_touching_store() {
+        use harness_core::SessionId;
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Seed one labeled and one unlabeled session so we can prove neither
+        // is mutated by a failing unlabel.
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let missing = SessionId::new().to_string();
+        let unknown_err = engine
+            .unlabel_session(&missing)
+            .expect_err("unknown session id must fail");
+        assert!(
+            unknown_err.contains("session not found"),
+            "unknown id must surface SessionNotFound diagnostic: {unknown_err}"
+        );
+
+        let already_err = engine
+            .unlabel_session(&session_id)
+            .expect_err("already-unlabeled session must fail");
+        assert!(
+            already_err.contains("session already unlabeled"),
+            "already-unlabeled session must surface the distinct diagnostic: {already_err}"
+        );
+        assert!(
+            already_err.contains(&session_id),
+            "already-unlabeled error must surface the resolved session id: {already_err}"
+        );
+
+        // The seeded session is still loadable and still unlabeled; failed
+        // unlabel must not mutate anything.
+        let reloaded = engine
+            .load_session(&session_id)
+            .expect("reload session after failed unlabel");
+        assert!(reloaded.label.is_none());
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
