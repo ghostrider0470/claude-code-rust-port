@@ -395,6 +395,12 @@ pub const DEFAULT_TRANSCRIPT_TAIL_COUNT: usize = 10;
 /// can rely on the documented contract.
 pub const DEFAULT_TRANSCRIPT_RANGE_COUNT: usize = 10;
 
+/// Default number of transcript entries returned on each side of the centered
+/// turn by `context_transcript` when the caller does not specify an explicit
+/// `--before` / `--after`. Kept stable so CLI scripts can rely on the
+/// documented contract.
+pub const DEFAULT_TRANSCRIPT_CONTEXT_WINDOW: usize = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTranscriptTail {
     pub selector: String,
@@ -424,6 +430,20 @@ pub struct SessionTranscriptRange {
     pub resolved_session_id: SessionId,
     pub start_turn_index: usize,
     pub requested_count: usize,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub returned_entries: usize,
+    pub entries: Vec<TranscriptEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptContext {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub center_turn_index: usize,
+    pub requested_before: usize,
+    pub requested_after: usize,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub total_entries: usize,
@@ -620,6 +640,48 @@ impl SessionStore {
             resolved_session_id: transcript.session_id,
             start_turn_index: start,
             requested_count: count,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries: total,
+            returned_entries: entries.len(),
+            entries,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// bounded symmetric window around `turn` in the matching persisted
+    /// transcript. The window includes the centered entry at
+    /// `turn_index == turn` when present plus up to `before` preceding and
+    /// `after` following entries in their original `turn_index` order. Windows
+    /// that extend past transcript bounds are clipped cleanly to the available
+    /// in-range entries. A `turn` past the end of the transcript, including
+    /// on an empty transcript, returns an empty `entries` array rather than
+    /// erroring. The persisted transcript is not mutated. Preserves existing
+    /// selector failure semantics unchanged (`SessionNotFound` /
+    /// `AmbiguousLabel` / `MalformedSelector`).
+    pub fn context_transcript(
+        &self,
+        selector: &str,
+        turn: usize,
+        before: usize,
+        after: usize,
+    ) -> Result<SessionTranscriptContext, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total = transcript.entries.len();
+        let entries = if turn >= total {
+            Vec::new()
+        } else {
+            let start = turn.saturating_sub(before);
+            let end = turn.saturating_add(after).saturating_add(1).min(total);
+            transcript.entries[start..end].to_vec()
+        };
+        Ok(SessionTranscriptContext {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            center_turn_index: turn,
+            requested_before: before,
+            requested_after: after,
             created_at_ms: transcript.created_at_ms,
             updated_at_ms: transcript.updated_at_ms,
             total_entries: total,
