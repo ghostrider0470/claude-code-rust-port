@@ -784,6 +784,36 @@ cargo run -q -p harness-cli -- session-fork latest "try again"
 }
 ```
 
+### `session-rename <id> <label>`
+
+Attach a deterministic human-readable label to a persisted session so it is easier to recognize in `sessions`, `session-show`, `session-export`, and related output. The rename preserves the existing `session_id`, does not mutate transcript entries or transcript ordering, and does not bump `updated_at_ms` so newest-first ordering stays activity-based. Labels are trimmed of surrounding whitespace, and empty or whitespace-only labels are rejected cleanly. The output uses a deterministic shape: `{ renamed_session_id, applied_label }`, where `renamed_session_id` confirms which session was targeted and `applied_label` is the normalized label that was persisted. Older unlabeled sessions stay readable — the label field only appears in persisted JSON after a session has actually been labeled.
+
+```bash
+cargo run -q -p harness-cli -- session-rename <session-id> runtime-review
+```
+
+```json
+{
+  "renamed_session_id": "<session-id>",
+  "applied_label": "runtime-review"
+}
+```
+
+### `session-rename latest <label>`
+
+`latest` resolves to the most recently active persisted session, mirroring how `session-show latest`, `transcript-show latest`, `session-export latest`, `session-compare latest latest`, `session-delete latest`, and `session-fork latest` resolve their targets. This is the ergonomic way to label the session you just worked on without having to copy its id by hand.
+
+```bash
+cargo run -q -p harness-cli -- session-rename latest runtime-review
+```
+
+```json
+{
+  "renamed_session_id": "<session-id>",
+  "applied_label": "runtime-review"
+}
+```
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -821,6 +851,9 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::fork` behavior: creates a fresh `session_id` rather than mutating the source, copies source messages and transcript entries forward in turn-index order, appends the new prompt as the first divergent turn, persists both the forked session JSON and its sibling transcript JSON, leaves the source session JSON and transcript exactly as they were, and reports `SessionNotFound` cleanly when the source id does not exist
 - `harness-runtime` `fork_session` behavior: resolves the `latest` selector to the most recently active persisted session, delegates to the store to write the forked session plus transcript, and fails cleanly for a missing source id without leaving partial persisted artifacts behind
 - README-backed CLI coverage for `session-fork <source-session-id> "try again"` and `session-fork latest "try again"` confirming the output identifies both the source and forked session ids, exposes the `appended_turn_index`, and reports the written session and transcript paths while the source session and transcript remain unchanged
+- `harness-session` `SessionStore::rename` behavior: trims surrounding whitespace on the label, rejects empty and whitespace-only labels with `InvalidLabel`, reports `SessionNotFound` cleanly when the target session does not exist, preserves the existing `session_id`, does not mutate transcript entries or ordering, and does not bump `updated_at_ms` so newest-first ordering stays activity-based; persisted JSON for unlabeled sessions remains identical in shape (no `label` field is emitted) so older sessions stay readable
+- `harness-runtime` `rename_session` behavior: resolves explicit session ids and the `latest` selector to the most recently active persisted session, delegates to the store to persist the normalized label, and fails cleanly with a descriptive error for invalid labels and unknown session ids without mutating any other persisted state
+- README-backed CLI coverage for `session-rename <id> <label>` and `session-rename latest <label>` confirming the output identifies the targeted session id and the applied label, that the rename leaves transcript entries and ordering untouched, and that unknown session ids and empty/whitespace-only labels fail cleanly
 
 Validation commands:
 
@@ -883,3 +916,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI session import for persisted session bundles (`session-import <bundle-path>`) that accepts the deterministic `{ exported_session_id, session, transcript }` shape emitted by `session-export`, recreates both persisted artifacts preserving the imported session id, recency/activity metadata, and transcript `turn_index` ordering, and fails cleanly without overwriting unrelated persisted sessions when the bundle is invalid or the target session id already exists locally
 - [x] CLI session search for persisted transcripts (`session-find <query>`) that case-insensitively matches transcript prompt text without mutating session state, returns a deterministic JSON array ordered using the existing newest-first session ordering, identifies each matched `session_id` with recency/activity metadata plus a `matches` array of `{ turn_index, prompt }` so results are useful from the terminal, and treats both empty queries and queries with no matches as a clean empty array instead of an error
 - [x] CLI session fork for persisted sessions (`session-fork <id> <prompt>` and `session-fork latest <prompt>`) that creates a fresh persisted session id rather than mutating the source, carries the source session messages and transcript forward in turn-index order, appends the new prompt as the first divergent turn, writes both forked persisted artifacts (`.sessions/<forked-session-id>.json` and its sibling transcript JSON), and emits a deterministic `{ source_session_id, forked_session_id, appended_turn_index, session_path, transcript_path }` shape while leaving the source session and transcript unchanged
+- [x] CLI session rename for persisted sessions (`session-rename <id> <label>` and `session-rename latest <label>`) that attaches a trimmed, non-empty human-readable label to persisted session metadata while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits a deterministic `{ renamed_session_id, applied_label }` shape, fails cleanly for unknown sessions and empty/whitespace-only labels, and keeps older unlabeled sessions readable by only emitting the label field once a session has actually been labeled

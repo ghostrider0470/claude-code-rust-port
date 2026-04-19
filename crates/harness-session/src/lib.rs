@@ -59,6 +59,8 @@ pub struct SessionState {
     pub updated_at_ms: u64,
     pub messages: Vec<Prompt>,
     pub usage: UsageSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 impl Default for SessionState {
@@ -70,6 +72,7 @@ impl Default for SessionState {
             updated_at_ms: now,
             messages: Vec::new(),
             usage: UsageSummary::default(),
+            label: None,
         }
     }
 }
@@ -211,6 +214,22 @@ pub struct SessionFork {
     pub appended_turn_index: TurnIndex,
     pub session_path: String,
     pub transcript_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRename {
+    pub renamed_session_id: SessionId,
+    pub applied_label: String,
+}
+
+pub fn normalize_label(raw: &str) -> Result<String, RuntimeError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(RuntimeError::InvalidLabel(
+            "label must not be empty or whitespace-only".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,6 +421,7 @@ impl SessionStore {
             updated_at_ms: now,
             messages: forked_messages,
             usage: source_session.usage.add_turn(prompt.as_str(), "turn forked"),
+            label: None,
         };
 
         let mut forked_entries = source_transcript.entries.clone();
@@ -426,6 +446,23 @@ impl SessionStore {
             appended_turn_index,
             session_path: session_path.display().to_string(),
             transcript_path: transcript_path.display().to_string(),
+        })
+    }
+
+    pub fn rename(
+        &self,
+        session_id: &str,
+        label: &str,
+    ) -> Result<SessionRename, RuntimeError> {
+        let applied_label = normalize_label(label)?;
+
+        let mut session = self.load(session_id)?;
+        session.label = Some(applied_label.clone());
+        self.save(&session)?;
+
+        Ok(SessionRename {
+            renamed_session_id: session.session_id,
+            applied_label,
         })
     }
 
@@ -528,6 +565,7 @@ mod tests {
         SessionComparison, SessionComparisonSide, SessionExport, SessionFindResult, SessionState,
         SessionStore, TranscriptEntry, TranscriptRecord, TranscriptStore,
     };
+    use super::normalize_label;
     use harness_core::{Prompt, RuntimeError, SessionId, TurnIndex};
     use std::collections::BTreeMap;
     use std::fs;
@@ -554,6 +592,7 @@ mod tests {
                 input_tokens: 4,
                 output_tokens: 2,
             },
+            label: None,
         };
 
         let saved_path = store.save(&session).expect("save session state");
@@ -599,6 +638,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
         let newer = SessionState {
             session_id: SessionId::new(),
@@ -609,6 +649,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
 
         store.save(&older).expect("save older session");
@@ -673,6 +714,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
         let newer = SessionState {
             session_id: SessionId::new(),
@@ -683,6 +725,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
             },
+            label: None,
         };
 
         store.save(&older).expect("save older session");
@@ -708,6 +751,7 @@ mod tests {
                 input_tokens: 4,
                 output_tokens: 4,
             },
+            label: None,
         };
 
         let mut transcript = TranscriptStore::default();
@@ -766,6 +810,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
         let newer = SessionState {
             session_id: SessionId::new(),
@@ -776,6 +821,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
             },
+            label: None,
         };
 
         let mut older_transcript = TranscriptStore::default();
@@ -811,6 +857,7 @@ mod tests {
                 input_tokens: 4,
                 output_tokens: 4,
             },
+            label: None,
         };
 
         let mut transcript = TranscriptStore::default();
@@ -859,6 +906,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
         let right_state = SessionState {
             session_id: SessionId::new(),
@@ -873,6 +921,7 @@ mod tests {
                 input_tokens: 6,
                 output_tokens: 6,
             },
+            label: None,
         };
 
         let mut left_transcript = TranscriptStore::default();
@@ -933,6 +982,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("review bash"));
@@ -976,6 +1026,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
             },
+            label: None,
         };
         let mut keeper_transcript = TranscriptStore::default();
         keeper_transcript.append(Prompt::new("keep me"));
@@ -1014,6 +1065,7 @@ mod tests {
                 input_tokens: 4,
                 output_tokens: 4,
             },
+            label: None,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("review bash"));
@@ -1078,6 +1130,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
             },
+            label: None,
         };
         let mut keeper_transcript = TranscriptStore::default();
         keeper_transcript.append(Prompt::new("keep me"));
@@ -1121,6 +1174,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
             },
+            label: None,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("one"));
@@ -1161,6 +1215,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
         let record = TranscriptRecord {
             session_id: session.session_id.clone(),
@@ -1203,6 +1258,7 @@ mod tests {
                 input_tokens: 4,
                 output_tokens: 4,
             },
+            label: None,
         };
         let mut older_transcript = TranscriptStore::default();
         older_transcript.append(Prompt::new("review bash"));
@@ -1218,6 +1274,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
         let mut newer_transcript = TranscriptStore::default();
         newer_transcript.append(Prompt::new("review tools"));
@@ -1232,6 +1289,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
         let mut unrelated_transcript = TranscriptStore::default();
         unrelated_transcript.append(Prompt::new("summary please"));
@@ -1297,6 +1355,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
         let mut transcript = TranscriptStore::default();
         transcript.append(Prompt::new("review bash"));
@@ -1333,6 +1392,7 @@ mod tests {
                 input_tokens: 4,
                 output_tokens: 4,
             },
+            label: None,
         };
         let mut source_transcript = TranscriptStore::default();
         source_transcript.append(Prompt::new("review bash"));
@@ -1450,6 +1510,7 @@ mod tests {
                 input_tokens: 2,
                 output_tokens: 2,
             },
+            label: None,
         };
         let second = SessionState {
             session_id: SessionId::new(),
@@ -1460,6 +1521,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
             },
+            label: None,
         };
 
         store.save(&first).expect("save first session");
@@ -1488,5 +1550,148 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn rename_stores_label_preserves_id_transcript_and_activity_metadata() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash"), Prompt::new("summary please")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 4,
+                output_tokens: 4,
+            },
+            label: None,
+        };
+        let mut transcript = TranscriptStore::default();
+        transcript.append(Prompt::new("review bash"));
+        transcript.append(Prompt::new("summary please"));
+        let record = TranscriptRecord::from_session(&session, &transcript);
+
+        store.save(&session).expect("save session");
+        store.save_transcript(&record).expect("save transcript");
+
+        let id = session.session_id.to_string();
+        let renamed = store
+            .rename(&id, "  runtime-review  ")
+            .expect("rename persisted session");
+
+        assert_eq!(renamed.renamed_session_id, session.session_id);
+        assert_eq!(renamed.applied_label, "runtime-review");
+
+        let reloaded = store.load(&id).expect("reload renamed session");
+        assert_eq!(reloaded.session_id, session.session_id);
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+        assert_eq!(
+            reloaded.created_at_ms, session.created_at_ms,
+            "rename must preserve created_at_ms"
+        );
+        assert_eq!(
+            reloaded.updated_at_ms, session.updated_at_ms,
+            "rename must preserve updated_at_ms so newest-first ordering stays activity-based"
+        );
+        assert_eq!(reloaded.messages, session.messages);
+        assert_eq!(reloaded.usage, session.usage);
+
+        let reloaded_transcript = store
+            .load_transcript(&id)
+            .expect("reload transcript after rename");
+        assert_eq!(
+            reloaded_transcript, record,
+            "rename must not mutate transcript entries or ordering"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn rename_rejects_empty_and_whitespace_only_labels_without_touching_store() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 2,
+                output_tokens: 2,
+            },
+            label: None,
+        };
+        store.save(&session).expect("save session");
+        let id = session.session_id.to_string();
+
+        for invalid in ["", "   ", "\t\n "] {
+            match store.rename(&id, invalid) {
+                Err(RuntimeError::InvalidLabel(_)) => {}
+                other => panic!("expected InvalidLabel for {invalid:?}, got {other:?}"),
+            }
+        }
+
+        let reloaded = store.load(&id).expect("reload session after rejected rename");
+        assert!(
+            reloaded.label.is_none(),
+            "rejected rename must not persist a label on the session"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn rename_missing_session_reports_session_not_found() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let missing = SessionId::new().to_string();
+        match store.rename(&missing, "anything") {
+            Err(RuntimeError::SessionNotFound(reported)) => assert_eq!(reported, missing),
+            other => panic!("expected SessionNotFound for missing id, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unlabeled_session_json_roundtrips_through_labeled_deserializer_for_backward_compat() {
+        let legacy = r#"{
+            "session_id": "11111111-1111-1111-1111-111111111111",
+            "created_at_ms": 1700000000001,
+            "updated_at_ms": 1700000000050,
+            "messages": ["review bash"],
+            "usage": { "input_tokens": 2, "output_tokens": 2 }
+        }"#;
+        let parsed: SessionState =
+            serde_json::from_str(legacy).expect("legacy unlabeled session JSON must still parse");
+        assert!(
+            parsed.label.is_none(),
+            "missing label field must deserialize to None"
+        );
+
+        let reserialized = serde_json::to_string(&parsed).expect("reserialize unlabeled session");
+        assert!(
+            !reserialized.contains("\"label\""),
+            "unlabeled session must not emit a label field: {reserialized}"
+        );
+    }
+
+    #[test]
+    fn normalize_label_trims_and_rejects_empty_whitespace() {
+        assert_eq!(normalize_label("hello").unwrap(), "hello");
+        assert_eq!(normalize_label("  runtime-review  ").unwrap(), "runtime-review");
+        assert!(matches!(
+            normalize_label(""),
+            Err(RuntimeError::InvalidLabel(_))
+        ));
+        assert!(matches!(
+            normalize_label("   \t\n"),
+            Err(RuntimeError::InvalidLabel(_))
+        ));
     }
 }

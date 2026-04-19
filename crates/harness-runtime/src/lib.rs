@@ -4,8 +4,8 @@ use harness_core::{
 };
 use harness_session::{
     SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
-    SessionFork, SessionImport, SessionListing, SessionState, SessionStore, TranscriptRecord,
-    TranscriptStore,
+    SessionFork, SessionImport, SessionListing, SessionRename, SessionState, SessionStore,
+    TranscriptRecord, TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -436,6 +436,13 @@ impl RuntimeEngine {
         let source = self.load_session(target)?;
         self.store
             .fork(&source.session_id.to_string(), prompt)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn rename_session(&self, target: &str, label: &str) -> Result<SessionRename, String> {
+        let source = self.load_session(target)?;
+        self.store
+            .rename(&source.session_id.to_string(), label)
             .map_err(|err| err.to_string())
     }
 
@@ -1264,6 +1271,124 @@ mod tests {
             RuntimeEvent::SessionPersisted { path }
                 if path == &report.persisted_path
         )));
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn rename_session_applies_label_preserves_id_and_transcript_and_supports_latest() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let bootstrap = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap session");
+        let id = bootstrap.session.session_id.to_string();
+        let original_updated = bootstrap.session.updated_at_ms;
+        let original_messages = bootstrap.session.messages.clone();
+        let transcript_before = engine
+            .load_transcript(&id)
+            .expect("load transcript before rename");
+
+        let renamed = engine
+            .rename_session(&id, "  runtime-review  ")
+            .expect("rename by explicit id");
+        assert_eq!(renamed.renamed_session_id.to_string(), id);
+        assert_eq!(renamed.applied_label, "runtime-review");
+
+        let reloaded = engine
+            .load_session(&id)
+            .expect("reload renamed session");
+        assert_eq!(reloaded.session_id.to_string(), id);
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+        assert_eq!(reloaded.messages, original_messages);
+        assert_eq!(
+            reloaded.updated_at_ms, original_updated,
+            "rename must not bump activity metadata"
+        );
+
+        let transcript_after = engine
+            .load_transcript(&id)
+            .expect("load transcript after rename");
+        assert_eq!(
+            transcript_after, transcript_before,
+            "rename must not mutate transcript entries or ordering"
+        );
+
+        let second = engine
+            .bootstrap(Prompt::new("summary please"))
+            .expect("bootstrap second session");
+        let second_id = second.session.session_id.to_string();
+        let latest_rename = engine
+            .rename_session("latest", "second-label")
+            .expect("rename via latest selector");
+        assert_eq!(
+            latest_rename.renamed_session_id.to_string(),
+            second_id,
+            "`latest` must resolve to the most recently active persisted session"
+        );
+        assert_eq!(latest_rename.applied_label, "second-label");
+
+        let first_after = engine
+            .load_session(&id)
+            .expect("first session must still load");
+        assert_eq!(
+            first_after.label.as_deref(),
+            Some("runtime-review"),
+            "first session's label must survive a rename of a different session"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn rename_session_rejects_invalid_labels_and_missing_targets_cleanly() {
+        use harness_core::{Prompt, SessionId};
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let bootstrap = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap session");
+        let id = bootstrap.session.session_id.to_string();
+
+        for invalid in ["", "   ", "\t\n"] {
+            let result = engine.rename_session(&id, invalid);
+            assert!(result.is_err(), "empty/whitespace label {invalid:?} must fail");
+            assert!(
+                result.unwrap_err().contains("invalid session label"),
+                "invalid label error should mention label"
+            );
+        }
+        assert!(
+            engine
+                .load_session(&id)
+                .expect("reload after rejected rename")
+                .label
+                .is_none(),
+            "rejected rename must not persist a label"
+        );
+
+        let missing = SessionId::new().to_string();
+        let missing_result = engine.rename_session(&missing, "whatever");
+        assert!(missing_result.is_err(), "unknown session id must fail");
+        assert!(
+            missing_result.unwrap_err().contains("session not found"),
+            "missing target error should mention session not found"
+        );
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }

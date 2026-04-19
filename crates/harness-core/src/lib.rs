@@ -158,6 +158,8 @@ pub enum RuntimeError {
     SessionAlreadyExists(String),
     #[error("invalid session bundle: {0}")]
     InvalidBundle(String),
+    #[error("invalid session label: {0}")]
+    InvalidLabel(String),
 }
 
 pub fn estimate_tokens(text: &str) -> usize {
