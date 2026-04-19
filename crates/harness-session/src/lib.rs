@@ -371,6 +371,20 @@ pub struct SessionPinEntry {
     pub label: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSelectorCheck {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub message_count: usize,
+    pub persisted_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -435,6 +449,29 @@ impl SessionStore {
             SessionSelector::Label(label) => self.resolve_label(&label),
             SessionSelector::Id(id) => Ok(id),
         }
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and surface the
+    /// resolved persisted session's descriptive metadata without mutating any
+    /// persisted state. Useful for inspect-only CLI scripts that need to
+    /// confirm which session a selector points at before running a mutating
+    /// command. Preserves existing selector failure semantics: unknown
+    /// id/label → `SessionNotFound`, duplicate labels → `AmbiguousLabel`,
+    /// empty `label:` → `MalformedSelector`.
+    pub fn check_selector(&self, selector: &str) -> Result<SessionSelectorCheck, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let session = self.load(&resolved_id)?;
+        let persisted_path = self.root.join(format!("{resolved_id}.json"));
+        Ok(SessionSelectorCheck {
+            selector: selector.to_string(),
+            resolved_session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            message_count: session.messages.len(),
+            persisted_path: persisted_path.display().to_string(),
+            label: session.label.clone(),
+            pinned: session.pinned,
+        })
     }
 
     /// Resolve a label to a single persisted `session_id`. Errors map cleanly:
@@ -3153,6 +3190,109 @@ mod tests {
         assert_eq!(labels[0].session_id, pinned.session_id);
         assert!(labels[0].pinned);
         assert!(!labels[1].pinned);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn check_selector_resolves_raw_id_latest_and_label_and_surfaces_pinned_and_label_metadata() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        // Older unlabeled anchor; newer labeled + pinned target.
+        let older = seed_session(&store, 1_700_000_000_100, None);
+        let newer = seed_session(&store, 1_700_000_000_500, Some("runtime-review"));
+        store
+            .pin(&newer.session_id.to_string())
+            .expect("pin newer for metadata surfacing");
+
+        let raw_id = older.session_id.to_string();
+        let by_id = store.check_selector(&raw_id).expect("check raw id");
+        assert_eq!(by_id.selector, raw_id);
+        assert_eq!(by_id.resolved_session_id, older.session_id);
+        assert_eq!(by_id.message_count, older.messages.len());
+        assert_eq!(by_id.created_at_ms, older.created_at_ms);
+        assert_eq!(by_id.updated_at_ms, older.updated_at_ms);
+        assert_eq!(
+            by_id.persisted_path,
+            root.join(format!("{raw_id}.json")).display().to_string()
+        );
+        assert!(by_id.label.is_none());
+        assert!(!by_id.pinned);
+
+        // `latest` resolves to the most recently active session (the newer one).
+        let by_latest = store.check_selector("latest").expect("check latest");
+        assert_eq!(by_latest.selector, "latest");
+        assert_eq!(by_latest.resolved_session_id, newer.session_id);
+        assert_eq!(by_latest.label.as_deref(), Some("runtime-review"));
+        assert!(by_latest.pinned);
+
+        // `label:<name>` routes through resolve_label and surfaces pinned+label.
+        let by_label = store
+            .check_selector("label:runtime-review")
+            .expect("check label");
+        assert_eq!(by_label.selector, "label:runtime-review");
+        assert_eq!(by_label.resolved_session_id, newer.session_id);
+        assert_eq!(by_label.label.as_deref(), Some("runtime-review"));
+        assert!(by_label.pinned);
+
+        // Inspect-only: persisted state is unchanged after the three checks.
+        let newer_reloaded = store
+            .load(&newer.session_id.to_string())
+            .expect("reload newer");
+        assert!(newer_reloaded.pinned);
+        assert_eq!(newer_reloaded.label.as_deref(), Some("runtime-review"));
+        assert_eq!(newer_reloaded.updated_at_ms, newer.updated_at_ms);
+        let older_reloaded = store.load(&raw_id).expect("reload older");
+        assert!(!older_reloaded.pinned);
+        assert!(older_reloaded.label.is_none());
+        assert_eq!(older_reloaded.updated_at_ms, older.updated_at_ms);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn check_selector_preserves_selector_failure_semantics_for_unknown_ambiguous_and_malformed() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        // Two sessions carrying the same label for the ambiguity case; plus an
+        // untouched anchor so the store root exists.
+        let _anchor = seed_session(&store, 1_700_000_000_050, None);
+        let _first = seed_session(&store, 1_700_000_000_100, Some("dup"));
+        let _second = seed_session(&store, 1_700_000_000_200, Some("dup"));
+
+        // Unknown raw id surfaces SessionNotFound verbatim via load().
+        let missing = "00000000-0000-0000-0000-000000000000";
+        match store.check_selector(missing) {
+            Err(RuntimeError::SessionNotFound(reported)) => assert_eq!(reported, missing),
+            other => panic!("expected SessionNotFound for unknown id, got {other:?}"),
+        }
+
+        // Unknown label surfaces SessionNotFound with `label:` prefix preserved.
+        match store.check_selector("label:missing") {
+            Err(RuntimeError::SessionNotFound(reported)) => {
+                assert_eq!(reported, "label:missing");
+            }
+            other => panic!("expected SessionNotFound for unknown label, got {other:?}"),
+        }
+
+        // Duplicate labels surface AmbiguousLabel rather than silently picking.
+        match store.check_selector("label:dup") {
+            Err(RuntimeError::AmbiguousLabel(message)) => {
+                assert!(message.contains("\"dup\""), "message should quote label: {message}");
+            }
+            other => panic!("expected AmbiguousLabel, got {other:?}"),
+        }
+
+        // Empty/whitespace `label:` surfaces MalformedSelector, distinct from
+        // "unknown label".
+        for malformed in ["label:", "label:   "] {
+            match store.check_selector(malformed) {
+                Err(RuntimeError::MalformedSelector(_)) => {}
+                other => panic!("expected MalformedSelector for {malformed:?}, got {other:?}"),
+            }
+        }
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
     }

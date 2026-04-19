@@ -38,6 +38,7 @@ enum CliCommand {
     },
     SessionPin { id: String },
     SessionUnpin { id: String },
+    SessionSelectorCheck { selector: String },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -157,6 +158,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             let unpinned = engine.unpin_session(&id).expect("unpin persisted session");
             serde_json::to_string_pretty(&unpinned).expect("serialize session unpin")
         }
+        CliCommand::SessionSelectorCheck { selector } => {
+            let check = engine
+                .check_session_selector(&selector)
+                .expect("check persisted session selector");
+            serde_json::to_string_pretty(&check).expect("serialize session selector check")
+        }
     }
 }
 
@@ -175,7 +182,8 @@ mod tests {
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
         SessionImport, SessionLabelEntry, SessionPin, SessionPinEntry, SessionPrune, SessionRename,
-        SessionRetag, SessionState, SessionStore, SessionUnlabel, SessionUnpin, TranscriptRecord,
+        SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionUnlabel,
+        SessionUnpin, TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -2838,6 +2846,210 @@ mod tests {
         assert!(!root
             .join(format!("{middle_id}.transcript.json"))
             .exists());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_selector_check_raw_id_matches_readme_example_and_leaves_store_untouched() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "inspect raw id");
+        let before = engine.load_session(&id).expect("reload before check");
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let output = render_command(
+            &engine,
+            CliCommand::SessionSelectorCheck {
+                selector: id.clone(),
+            },
+        );
+        let check: SessionSelectorCheck =
+            serde_json::from_str(&output).expect("parse session-selector-check output");
+
+        assert_eq!(check.selector, id);
+        assert_eq!(check.resolved_session_id.to_string(), id);
+        assert_eq!(check.message_count, 1);
+        assert_eq!(check.created_at_ms, before.created_at_ms);
+        assert_eq!(check.updated_at_ms, before.updated_at_ms);
+        assert_eq!(check.persisted_path, root.join(format!("{id}.json")).display().to_string());
+        assert!(check.label.is_none());
+        assert!(!check.pinned);
+
+        let normalized = normalize_timestamps(
+            &output
+                .replace(&id, "<session-id>")
+                .replace(root.to_string_lossy().as_ref(), ".sessions"),
+        );
+        assert_eq!(
+            normalized,
+            readme_output_block("session-selector-check <selector>", "json")
+        );
+
+        // Check does not mutate any persisted state.
+        let after = engine.load_session(&id).expect("reload after check");
+        assert_eq!(after, before);
+        let after_transcript = engine.load_transcript(&id).expect("reload transcript after");
+        assert_eq!(after_transcript, before_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_selector_check_latest_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer");
+
+        let output = render_command(
+            &engine,
+            CliCommand::SessionSelectorCheck {
+                selector: "latest".to_string(),
+            },
+        );
+        let check: SessionSelectorCheck =
+            serde_json::from_str(&output).expect("parse session-selector-check latest output");
+
+        assert_eq!(check.selector, "latest");
+        assert_eq!(check.resolved_session_id.to_string(), newer);
+        assert!(check.label.is_none());
+        assert!(!check.pinned);
+
+        // Ordering unchanged after a selector check.
+        let listed: Vec<String> = engine
+            .list_sessions()
+            .expect("list after selector check")
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(listed.first().map(String::as_str), Some(newer.as_str()));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_selector_check_label_selector_surfaces_pinned_and_label_metadata() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "pinned + labeled");
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label before check");
+        engine.pin_session(&id).expect("pin before check");
+
+        let output = render_command(
+            &engine,
+            CliCommand::SessionSelectorCheck {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let check: SessionSelectorCheck =
+            serde_json::from_str(&output).expect("parse session-selector-check label output");
+
+        assert_eq!(check.selector, "label:runtime-review");
+        assert_eq!(check.resolved_session_id.to_string(), id);
+        assert_eq!(check.label.as_deref(), Some("runtime-review"));
+        assert!(check.pinned);
+
+        let normalized = normalize_timestamps(
+            &output
+                .replace(&id, "<session-id>")
+                .replace(root.to_string_lossy().as_ref(), ".sessions"),
+        );
+        assert_eq!(
+            normalized,
+            readme_output_block(
+                "session-selector-check latest` / `session-selector-check label:<name>",
+                "json"
+            )
+        );
+
+        // The persisted session is untouched and still pinned + labeled.
+        let reloaded = engine.load_session(&id).expect("reload after check");
+        assert!(reloaded.pinned);
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_selector_check_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Anchor a real session so the store directory exists and the
+        // unknown-selector failures are surfaced by resolve_selector rather
+        // than by a missing store root.
+        let anchor_id = bootstrap_session_id(&engine, "anchor");
+
+        let missing_id = "00000000-0000-0000-0000-000000000000";
+        let err = engine
+            .check_session_selector(missing_id)
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .check_session_selector("label:nonexistent")
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        // Anchor session remains untouched.
+        assert!(engine.load_session(&anchor_id).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_selector_check_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
+
+        let err = engine
+            .check_session_selector("label:duplicate")
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_selector_check_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .check_session_selector("label:")
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }

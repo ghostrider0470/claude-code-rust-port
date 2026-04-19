@@ -1072,6 +1072,47 @@ cargo run -q -p harness-cli -- session-unpin label:runtime-review
 }
 ```
 
+### `session-selector-check <selector>`
+
+Resolve a single-session selector and surface the targeted persisted session's descriptive metadata without mutating any persisted state, transcript entry, label, pinned flag, id, path, or ordering metadata. Accepts the same forms every other single-session command accepts — a raw `session_id`, `latest`, or `label:<name>` — routed through the shared selector-resolution path so behavior is identical to `session-show`, `session-pin`, etc. Output uses a deterministic shape: `{ selector, resolved_session_id, created_at_ms, updated_at_ms, message_count, persisted_path, label?, pinned? }`, where `selector` echoes the raw input verbatim (so scripts can correlate the request with the resolution) and `resolved_session_id` is the persisted id the selector actually maps to. `label` is only emitted when the targeted session carries one, and `pinned` is only emitted when `true`, mirroring how those fields appear on existing listings. Selector failure semantics stay unchanged: unknown ids and unknown labels surface as `session not found`, duplicate labels surface as `ambiguous label` (before any mutating command would otherwise pick one arbitrarily), and `label:` with no name surfaces as `malformed selector`.
+
+```bash
+cargo run -q -p harness-cli -- session-selector-check <session-id>
+```
+
+```json
+{
+  "selector": "<session-id>",
+  "resolved_session_id": "<session-id>",
+  "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
+  "message_count": 1,
+  "persisted_path": ".sessions/<session-id>.json"
+}
+```
+
+### `session-selector-check latest` / `session-selector-check label:<name>`
+
+`latest` resolves to the most recently active persisted session, and `label:<name>` is accepted here too. Pinned and labeled sessions surface `pinned: true` and `label: "<name>"` in the output so inspect-only scripts can confirm both the resolution target and its protection / naming state in a single call, without having to fan out to `session-show`, `session-pins`, and `session-labels` separately.
+
+```bash
+cargo run -q -p harness-cli -- session-selector-check latest
+cargo run -q -p harness-cli -- session-selector-check label:runtime-review
+```
+
+```json
+{
+  "selector": "label:runtime-review",
+  "resolved_session_id": "<session-id>",
+  "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
+  "message_count": 1,
+  "persisted_path": ".sessions/<session-id>.json",
+  "label": "runtime-review",
+  "pinned": true
+}
+```
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -1133,6 +1174,9 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::list_pins` behavior: emits one entry per pinned persisted session, uses the same newest-first ordering as `list()` (`updated_at_ms` → `created_at_ms` → `session_id` → `persisted_path`), omits unpinned sessions, surfaces `label` when the pinned session carries one (and omits the field when unlabeled), keeps duplicate labels on pinned sessions visible as separate rows, returns a clean empty vector when no persisted session is pinned, and never mutates persisted state
 - `harness-runtime` `list_session_pins` behavior: delegates to the store so the CLI surface shares ordering, omission, and label-surfacing semantics with `list_pins`, and surfaces an empty listing cleanly when no persisted session is pinned
 - README-backed CLI coverage for `session-pins` and `session-pins <empty-store>` confirming the listing is newest-first, exposes `session_id`, recency metadata, `message_count`, `persisted_path`, and `pinned: true`, surfaces `label` only when the pinned session carries one, omits unpinned sessions, and returns a deterministic empty JSON array when no persisted session is pinned
+- `harness-session` `SessionStore::check_selector` behavior: routes the selector through the shared `resolve_selector` machinery, surfaces the resolved persisted session's `session_id`, `created_at_ms`, `updated_at_ms`, `message_count`, `persisted_path`, and — when present — `label` and `pinned`, leaves persisted session state, transcripts, labels, pinned flags, ids, paths, and ordering metadata untouched, and preserves existing selector failure semantics (unknown id/label → `SessionNotFound`, duplicate labels → `AmbiguousLabel`, empty `label:` → `MalformedSelector`)
+- `harness-runtime` `check_session_selector` behavior: delegates to the store so the CLI surface shares selector resolution with every other single-session command, and surfaces unknown / ambiguous / malformed selectors as distinct, descriptive errors without mutating any persisted state
+- README-backed CLI coverage for `session-selector-check <id>`, `session-selector-check latest`, and `session-selector-check label:<name>` confirming the output echoes the raw selector, identifies the resolved `session_id`, exposes recency metadata / `message_count` / `persisted_path`, surfaces `label` and `pinned: true` only when the targeted session carries them, and that unknown ids/labels, duplicate labels, and malformed label selectors fail cleanly with distinct diagnostics
 
 Validation commands:
 
@@ -1201,3 +1245,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI session-unlabel for persisted sessions (`session-unlabel <id>`, `session-unlabel latest`, and `session-unlabel label:<name>`) that removes only the persisted `label` metadata field while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits a deterministic `{ unlabeled_session_id, removed_label }` shape, fails cleanly for unknown sessions/selectors and for attempts to unlabel a session that is already unlabeled, and keeps older unlabeled sessions backward-compatible by not serializing a null/empty label field after removal
 - [x] CLI session-retag for persisted sessions (`session-retag <id> <label>`, `session-retag latest <label>`, and `session-retag label:<old-name> <new-name>`) that atomically replaces the persisted `label` metadata field while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits a deterministic `{ retagged_session_id, previous_label, applied_label }` shape, fails cleanly for unknown sessions/selectors, empty/whitespace-only labels, attempts to retag a session that carries no label, and attempts where the requested label normalizes to the same effective value already present, and keeps older unlabeled sessions backward-compatible by only serializing the label field when present
 - [x] CLI session-pin / session-unpin for persisted sessions (`session-pin <id>`, `session-pin latest`, `session-pin label:<name>`, `session-unpin <id>`, `session-unpin latest`, and `session-unpin label:<name>`) that toggle a deterministic `pinned` flag on session metadata while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits deterministic `{ pinned_session_id, pinned }` / `{ unpinned_session_id, pinned }` shapes, keeps older unpinned sessions backward-compatible by only serializing the `pinned` field when the session is actually pinned, surfaces the `pinned` flag through `sessions`, `session-show`, `session-export`, `session-compare`, and `session-labels`, and makes `session-prune --keep <count>` skip pinned sessions — apply newest-first ordering only across the unpinned subset and report rescued pins via a new `pinned_preserved_count` and `pinned_preserved` pair on the prune output
+- [x] CLI session-selector-check for persisted sessions (`session-selector-check <id>`, `session-selector-check latest`, and `session-selector-check label:<name>`) that routes the selector through the shared selector-resolution path and surfaces the resolved persisted session's descriptive metadata without mutating session state, transcript entries, labels, pinned flags, ids, paths, or ordering metadata; emits a deterministic `{ selector, resolved_session_id, created_at_ms, updated_at_ms, message_count, persisted_path, label?, pinned? }` shape where `selector` echoes the raw input, `label` only appears when the targeted session carries one, and `pinned` only appears when `true`; preserves existing selector failure semantics unchanged (unknown id/label → `session not found`, duplicate labels → `ambiguous label`, empty `label:` → `malformed selector`)
