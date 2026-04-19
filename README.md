@@ -814,6 +814,29 @@ cargo run -q -p harness-cli -- session-rename latest runtime-review
 }
 ```
 
+### Label selectors (`label:<name>`)
+
+Once a session has been renamed via `session-rename`, the `label:<name>` selector targets that session anywhere a single persisted session id is accepted: `session-show`, `transcript-show`, `resume`, `session-export`, `session-delete`, `session-fork`, `session-rename`, and on either side of `session-compare`. Raw session ids and the `latest` selector continue to behave exactly as before — label support is additive.
+
+```bash
+cargo run -q -p harness-cli -- session-show label:runtime-review
+cargo run -q -p harness-cli -- session-compare label:runtime-review latest
+```
+
+Selector resolution rules:
+
+- `latest` — most recently active persisted session, ordering driven by `updated_at_ms` (unchanged)
+- `label:<name>` — the unique persisted session whose normalized label equals `<name>` (whitespace around `<name>` is trimmed)
+- anything else — treated as a raw session id and looked up directly
+
+Failure modes are deterministic and distinct so the CLI surfaces the right diagnosis:
+
+- unknown label (no persisted session carries `<name>`) → `session not found: label:<name>`
+- ambiguous label (more than one persisted session shares `<name>`) → `ambiguous session label: label "<name>" matches N persisted sessions`
+- malformed selector (`label:` with no name) → `malformed session selector: label selector requires a non-empty label after \`label:\``
+
+Machine-readable JSON outputs continue to identify the actual resolved `session_id` values rather than echoing the selector string, so downstream tooling can rely on the resolved id even when the user typed `label:<name>` or `latest`. Older unlabeled sessions and mixed labeled/unlabeled stores keep working — sessions without a label are transparently skipped during label resolution.
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -854,6 +877,9 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::rename` behavior: trims surrounding whitespace on the label, rejects empty and whitespace-only labels with `InvalidLabel`, reports `SessionNotFound` cleanly when the target session does not exist, preserves the existing `session_id`, does not mutate transcript entries or ordering, and does not bump `updated_at_ms` so newest-first ordering stays activity-based; persisted JSON for unlabeled sessions remains identical in shape (no `label` field is emitted) so older sessions stay readable
 - `harness-runtime` `rename_session` behavior: resolves explicit session ids and the `latest` selector to the most recently active persisted session, delegates to the store to persist the normalized label, and fails cleanly with a descriptive error for invalid labels and unknown session ids without mutating any other persisted state
 - README-backed CLI coverage for `session-rename <id> <label>` and `session-rename latest <label>` confirming the output identifies the targeted session id and the applied label, that the rename leaves transcript entries and ordering untouched, and that unknown session ids and empty/whitespace-only labels fail cleanly
+- `harness-session` `SessionSelector` parsing and `SessionStore::resolve_selector` behavior: dispatches `latest`, `label:<name>`, and raw id forms against persisted state, with unknown labels reported as `SessionNotFound("label:<name>")`, duplicate labels reported as `AmbiguousLabel`, and an empty `label:` reported as `MalformedSelector`; sessions without a label are transparently skipped so mixed labeled/unlabeled stores keep working
+- `harness-runtime` label selector behavior: `load_session`, `load_transcript`, `delete_session`, `export_session`, `compare_sessions`, `fork_session`, and `rename_session` all accept `label:<name>` wherever they previously accepted an explicit persisted session id, with raw ids and `latest` unchanged; machine-readable outputs continue to identify the actual resolved `session_id` values rather than the selector string
+- README-backed CLI coverage for label-based single-session targeting (`session-show label:<name>`) confirming raw-id targeting still works unchanged after a label is applied, the resolved `session_id` (not the label string) appears in the JSON output, and for `session-compare label:<name> latest` confirming the mixed label-plus-latest path resolves both sides to the correct persisted session ids; unknown, ambiguous, and malformed label selectors fail cleanly with distinct diagnostics
 
 Validation commands:
 
@@ -917,3 +943,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI session search for persisted transcripts (`session-find <query>`) that case-insensitively matches transcript prompt text without mutating session state, returns a deterministic JSON array ordered using the existing newest-first session ordering, identifies each matched `session_id` with recency/activity metadata plus a `matches` array of `{ turn_index, prompt }` so results are useful from the terminal, and treats both empty queries and queries with no matches as a clean empty array instead of an error
 - [x] CLI session fork for persisted sessions (`session-fork <id> <prompt>` and `session-fork latest <prompt>`) that creates a fresh persisted session id rather than mutating the source, carries the source session messages and transcript forward in turn-index order, appends the new prompt as the first divergent turn, writes both forked persisted artifacts (`.sessions/<forked-session-id>.json` and its sibling transcript JSON), and emits a deterministic `{ source_session_id, forked_session_id, appended_turn_index, session_path, transcript_path }` shape while leaving the source session and transcript unchanged
 - [x] CLI session rename for persisted sessions (`session-rename <id> <label>` and `session-rename latest <label>`) that attaches a trimmed, non-empty human-readable label to persisted session metadata while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits a deterministic `{ renamed_session_id, applied_label }` shape, fails cleanly for unknown sessions and empty/whitespace-only labels, and keeps older unlabeled sessions readable by only emitting the label field once a session has actually been labeled
+- [x] CLI label selectors (`label:<name>`) for persisted sessions accepted anywhere a single persisted session id is accepted (`session-show`, `transcript-show`, `resume`, `session-export`, `session-delete`, `session-fork`, `session-rename`, and either side of `session-compare`); raw session ids and `latest` keep their existing behavior, machine-readable JSON outputs continue to surface the actual resolved `session_id`, and unknown labels, ambiguous labels (more than one persisted session sharing the same label), and malformed selectors (`label:` with no name) all fail cleanly with distinct diagnostics; activity-based newest-first ordering is unchanged and mixed labeled/unlabeled stores stay backward-compatible

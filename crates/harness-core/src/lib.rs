@@ -160,6 +160,10 @@ pub enum RuntimeError {
     InvalidBundle(String),
     #[error("invalid session label: {0}")]
     InvalidLabel(String),
+    #[error("ambiguous session label: {0}")]
+    AmbiguousLabel(String),
+    #[error("malformed session selector: {0}")]
+    MalformedSelector(String),
 }
 
 pub fn estimate_tokens(text: &str) -> usize {

@@ -232,6 +232,41 @@ pub fn normalize_label(raw: &str) -> Result<String, RuntimeError> {
     Ok(trimmed.to_string())
 }
 
+pub const LABEL_SELECTOR_PREFIX: &str = "label:";
+pub const LATEST_SELECTOR: &str = "latest";
+
+/// Parsed form of a single-session CLI selector. Raw ids are returned verbatim
+/// (no UUID validation here — the load step surfaces unknown ids via
+/// `SessionNotFound`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionSelector {
+    Latest,
+    Label(String),
+    Id(String),
+}
+
+impl SessionSelector {
+    /// Parse a CLI selector string. Recognises `latest`, `label:<name>`, and
+    /// otherwise treats input as a raw id. `label:` with an empty/whitespace
+    /// label is reported as a malformed selector so the failure is distinct
+    /// from "unknown label" or "unknown id".
+    pub fn parse(raw: &str) -> Result<Self, RuntimeError> {
+        if raw == LATEST_SELECTOR {
+            return Ok(Self::Latest);
+        }
+        if let Some(rest) = raw.strip_prefix(LABEL_SELECTOR_PREFIX) {
+            let trimmed = rest.trim();
+            if trimmed.is_empty() {
+                return Err(RuntimeError::MalformedSelector(format!(
+                    "label selector requires a non-empty label after `{LABEL_SELECTOR_PREFIX}`"
+                )));
+            }
+            return Ok(Self::Label(trimmed.to_string()));
+        }
+        Ok(Self::Id(raw.to_string()))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListing {
     pub session_id: SessionId,
@@ -308,6 +343,55 @@ impl SessionStore {
         }
         let body = fs::read_to_string(&path).map_err(|err| RuntimeError::Io(err.to_string()))?;
         serde_json::from_str(&body).map_err(|err| RuntimeError::Serialization(err.to_string()))
+    }
+
+    /// Resolve a CLI selector (`latest`, `label:<name>`, or a raw id) to a
+    /// concrete persisted `session_id` string. Raw ids are returned verbatim
+    /// without disk I/O so callers can still surface `SessionNotFound` from
+    /// their own load step. `latest` and label selectors do touch disk because
+    /// they need to scan persisted state.
+    pub fn resolve_selector(&self, selector: &str) -> Result<String, RuntimeError> {
+        match SessionSelector::parse(selector)? {
+            SessionSelector::Latest => Ok(self.latest()?.session_id.to_string()),
+            SessionSelector::Label(label) => self.resolve_label(&label),
+            SessionSelector::Id(id) => Ok(id),
+        }
+    }
+
+    /// Resolve a label to a single persisted `session_id`. Errors map cleanly:
+    /// no match → `SessionNotFound("label:<name>")`, more than one match →
+    /// `AmbiguousLabel`. Sessions without a label (older or never-renamed) are
+    /// transparently skipped so mixed labeled/unlabeled stores keep working.
+    pub fn resolve_label(&self, label: &str) -> Result<String, RuntimeError> {
+        let trimmed = label.trim();
+        if trimmed.is_empty() {
+            return Err(RuntimeError::MalformedSelector(format!(
+                "label selector requires a non-empty label after `{LABEL_SELECTOR_PREFIX}`"
+            )));
+        }
+
+        let mut matched_ids: Vec<String> = Vec::new();
+        for listing in self.list()? {
+            let id = listing.session_id.to_string();
+            let session = match self.load(&id) {
+                Ok(state) => state,
+                Err(RuntimeError::SessionNotFound(_)) => continue,
+                Err(other) => return Err(other),
+            };
+            if session.label.as_deref() == Some(trimmed) {
+                matched_ids.push(id);
+            }
+        }
+
+        match matched_ids.len() {
+            0 => Err(RuntimeError::SessionNotFound(format!(
+                "{LABEL_SELECTOR_PREFIX}{trimmed}"
+            ))),
+            1 => Ok(matched_ids.remove(0)),
+            n => Err(RuntimeError::AmbiguousLabel(format!(
+                "label {trimmed:?} matches {n} persisted sessions"
+            ))),
+        }
     }
 
     pub fn latest(&self) -> Result<SessionState, RuntimeError> {
@@ -1679,6 +1763,122 @@ mod tests {
             !reserialized.contains("\"label\""),
             "unlabeled session must not emit a label field: {reserialized}"
         );
+    }
+
+    #[test]
+    fn resolve_selector_dispatches_latest_label_and_raw_id_against_persisted_state() {
+        use super::SessionSelector;
+
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        // Two sessions: older labeled, newer unlabeled, so newest-first ordering
+        // is independent of the label match.
+        let labeled = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_000,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary::default(),
+            label: Some("runtime-review".to_string()),
+        };
+        let unlabeled = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_500,
+            updated_at_ms: 1_700_000_000_500,
+            messages: vec![Prompt::new("summary")],
+            usage: harness_core::UsageSummary::default(),
+            label: None,
+        };
+        store.save(&labeled).expect("save labeled");
+        store.save(&unlabeled).expect("save unlabeled");
+
+        // Raw id round-trips verbatim with no disk I/O assumptions.
+        let raw_id = labeled.session_id.to_string();
+        assert_eq!(store.resolve_selector(&raw_id).unwrap(), raw_id);
+
+        // `latest` follows updated_at_ms, not label.
+        assert_eq!(
+            store.resolve_selector("latest").unwrap(),
+            unlabeled.session_id.to_string()
+        );
+
+        // Label resolves to the labeled session even though it is older.
+        assert_eq!(
+            store.resolve_selector("label:runtime-review").unwrap(),
+            labeled.session_id.to_string()
+        );
+
+        // Selector parsing covers raw + latest + label forms.
+        assert_eq!(
+            SessionSelector::parse("latest").unwrap(),
+            SessionSelector::Latest
+        );
+        assert_eq!(
+            SessionSelector::parse("label:foo").unwrap(),
+            SessionSelector::Label("foo".to_string())
+        );
+        assert_eq!(
+            SessionSelector::parse("abc-123").unwrap(),
+            SessionSelector::Id("abc-123".to_string())
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn resolve_label_reports_unknown_ambiguous_and_malformed_selectors_cleanly() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let first = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_000_000,
+            messages: vec![Prompt::new("a")],
+            usage: harness_core::UsageSummary::default(),
+            label: Some("dup".to_string()),
+        };
+        let second = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_100,
+            updated_at_ms: 1_700_000_000_100,
+            messages: vec![Prompt::new("b")],
+            usage: harness_core::UsageSummary::default(),
+            label: Some("dup".to_string()),
+        };
+        store.save(&first).expect("save first");
+        store.save(&second).expect("save second");
+
+        // Unknown label surfaces as SessionNotFound with the `label:` prefix
+        // preserved so the CLI error mentions the selector the user typed.
+        match store.resolve_selector("label:missing") {
+            Err(RuntimeError::SessionNotFound(reported)) => {
+                assert_eq!(reported, "label:missing");
+            }
+            other => panic!("expected SessionNotFound for unknown label, got {other:?}"),
+        }
+
+        // Two sessions carrying the same label is an ambiguity error, not a
+        // silent newest-wins.
+        match store.resolve_selector("label:dup") {
+            Err(RuntimeError::AmbiguousLabel(message)) => {
+                assert!(message.contains("\"dup\""), "message should quote label: {message}");
+                assert!(message.contains('2'), "message should mention match count: {message}");
+            }
+            other => panic!("expected AmbiguousLabel, got {other:?}"),
+        }
+
+        // `label:` with no name (or only whitespace) is a malformed selector,
+        // distinct from "unknown label".
+        for malformed in ["label:", "label:   "] {
+            match store.resolve_selector(malformed) {
+                Err(RuntimeError::MalformedSelector(_)) => {}
+                other => panic!("expected MalformedSelector for {malformed:?}, got {other:?}"),
+            }
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
     }
 
     #[test]
