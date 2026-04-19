@@ -23,6 +23,7 @@ enum CliCommand {
     TranscriptShow { id: String },
     SessionExport { id: String },
     SessionCompare { left: String, right: String },
+    SessionDelete { id: String },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -74,6 +75,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("compare persisted sessions");
             serde_json::to_string_pretty(&comparison).expect("serialize session comparison")
         }
+        CliCommand::SessionDelete { id } => {
+            let deletion = engine
+                .delete_session(&id)
+                .expect("delete persisted session");
+            serde_json::to_string_pretty(&deletion).expect("serialize session deletion")
+        }
     }
 }
 
@@ -90,7 +97,8 @@ mod tests {
     use harness_commands::CommandRegistry;
     use harness_runtime::RuntimeEngine;
     use harness_session::{
-        SessionComparison, SessionExport, SessionState, SessionStore, TranscriptRecord,
+        SessionComparison, SessionDeletion, SessionExport, SessionState, SessionStore,
+        TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -704,6 +712,87 @@ mod tests {
         assert_eq!(
             normalize_session_output(&compare_output, &session_id),
             readme_output_block("session-compare latest latest", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_delete_matches_readme_example_and_removes_persisted_artifacts() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let delete_output = render_command(
+            &engine,
+            CliCommand::SessionDelete {
+                id: session_id.clone(),
+            },
+        );
+
+        let deletion: SessionDeletion =
+            serde_json::from_str(&delete_output).expect("parse session-delete output");
+        assert_eq!(deletion.deleted_session_id.to_string(), session_id);
+        assert_eq!(deletion.removed_paths.len(), 2);
+        for path in &deletion.removed_paths {
+            assert!(!std::path::Path::new(path).exists(), "removed path must not exist");
+        }
+
+        assert_eq!(
+            normalize_bootstrap_example(&delete_output, &session_id, &root),
+            readme_output_block("session-delete <id>", "json")
+        );
+
+        let after = engine.list_sessions().expect("list after delete");
+        assert!(after.is_empty(), "session listing must be empty after delete");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_delete_latest_matches_readme_example_and_targets_most_recent() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let latest_output = render_command(
+            &engine,
+            CliCommand::SessionDelete {
+                id: "latest".to_string(),
+            },
+        );
+
+        let deletion: SessionDeletion =
+            serde_json::from_str(&latest_output).expect("parse session-delete latest output");
+        assert_eq!(deletion.deleted_session_id.to_string(), session_id);
+
+        assert_eq!(
+            normalize_bootstrap_example(&latest_output, &session_id, &root),
+            readme_output_block("session-delete latest", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");

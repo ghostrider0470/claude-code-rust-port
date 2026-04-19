@@ -3,8 +3,8 @@ use harness_core::{
     CommandName, MatchScore, PermissionDenial, Prompt, RuntimeEvent, SessionId, ToolName, TurnIndex,
 };
 use harness_session::{
-    SessionComparison, SessionComparisonSide, SessionExport, SessionListing, SessionState,
-    SessionStore, TranscriptRecord, TranscriptStore,
+    SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionListing,
+    SessionState, SessionStore, TranscriptRecord, TranscriptStore,
 };
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
@@ -412,6 +412,18 @@ impl RuntimeEngine {
         ))
     }
 
+    pub fn delete_session(&self, target: &str) -> Result<SessionDeletion, String> {
+        if target == "latest" {
+            let latest = self.store.latest().map_err(|err| err.to_string())?;
+            return self
+                .store
+                .delete(&latest.session_id.to_string())
+                .map_err(|err| err.to_string());
+        }
+
+        self.store.delete(target).map_err(|err| err.to_string())
+    }
+
     fn comparison_side_for(&self, id: &str) -> Result<SessionComparisonSide, String> {
         let session = self.load_session(id)?;
         let transcript = self
@@ -744,6 +756,104 @@ mod tests {
         assert!(self_compare.differences.same_session);
         assert_eq!(self_compare.differences.message_count_delta, 0);
         assert_eq!(self_compare.differences.updated_at_ms_delta, 0);
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn delete_session_removes_session_and_transcript_for_explicit_id_and_fails_when_missing() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let bootstrap = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap session");
+        let id = bootstrap.session.session_id.to_string();
+
+        let deletion = engine
+            .delete_session(&id)
+            .expect("delete persisted session by id");
+
+        assert_eq!(deletion.deleted_session_id.to_string(), id);
+        assert_eq!(
+            deletion.removed_paths,
+            vec![
+                bootstrap.persisted_path.clone(),
+                bootstrap.persisted_transcript_path.clone(),
+            ]
+        );
+
+        assert!(engine.load_session(&id).is_err());
+        assert!(engine.load_transcript(&id).is_err());
+        assert!(engine.list_sessions().expect("list").is_empty());
+
+        let second_attempt = engine.delete_session(&id);
+        assert!(
+            second_attempt.is_err(),
+            "deleting an already-deleted session must fail cleanly"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn delete_session_latest_targets_most_recently_active_and_preserves_siblings() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let first = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap first session");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = engine
+            .bootstrap(Prompt::new("summary"))
+            .expect("bootstrap second session");
+        let first_id = first.session.session_id.to_string();
+        let second_id = second.session.session_id.to_string();
+
+        let deletion = engine
+            .delete_session("latest")
+            .expect("delete latest persisted session");
+
+        assert_eq!(
+            deletion.deleted_session_id.to_string(),
+            second_id,
+            "`latest` must resolve to the most recently active session"
+        );
+        assert_eq!(
+            deletion.removed_paths,
+            vec![
+                second.persisted_path.clone(),
+                second.persisted_transcript_path.clone(),
+            ]
+        );
+
+        assert!(engine.load_session(&second_id).is_err());
+        let surviving = engine
+            .load_session(&first_id)
+            .expect("untouched session must still load");
+        assert_eq!(surviving, first.session);
+        let remaining_ids: Vec<String> = engine
+            .list_sessions()
+            .expect("list after delete")
+            .into_iter()
+            .map(|listing| listing.session_id.to_string())
+            .collect();
+        assert_eq!(remaining_ids, vec![first_id]);
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }
