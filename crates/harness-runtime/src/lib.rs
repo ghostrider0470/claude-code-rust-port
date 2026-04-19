@@ -4,8 +4,8 @@ use harness_core::{
 };
 use harness_session::{
     SessionComparison, SessionComparisonSide, SessionDeletion, SessionExport, SessionFindResult,
-    SessionFork, SessionImport, SessionListing, SessionRename, SessionState, SessionStore,
-    TranscriptRecord, TranscriptStore,
+    SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionRename, SessionState,
+    SessionStore, TranscriptRecord, TranscriptStore,
 };
 use std::fs;
 use std::path::Path;
@@ -385,6 +385,10 @@ impl RuntimeEngine {
 
     pub fn find_sessions(&self, query: &str) -> Result<Vec<SessionFindResult>, String> {
         self.store.find(query).map_err(|err| err.to_string())
+    }
+
+    pub fn list_session_labels(&self) -> Result<Vec<SessionLabelEntry>, String> {
+        self.store.list_labels().map_err(|err| err.to_string())
     }
 
     /// Resolve a CLI selector (`latest`, `label:<name>`, or raw id) to the
@@ -1464,6 +1468,120 @@ mod tests {
         assert!(
             malformed.unwrap_err().contains("malformed session selector"),
             "error should mention malformed selector"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn list_session_labels_returns_newest_first_entries_and_omits_unlabeled_sessions() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        // Three bootstraps in time order. Only two get labeled, and the newest
+        // of those is the one we label second.
+        let older = engine.bootstrap(Prompt::new("alpha")).expect("bootstrap alpha");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let middle = engine.bootstrap(Prompt::new("beta")).expect("bootstrap beta");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newest = engine
+            .bootstrap(Prompt::new("gamma"))
+            .expect("bootstrap gamma");
+
+        engine
+            .rename_session(&older.session.session_id.to_string(), "runtime-review")
+            .expect("label older");
+        engine
+            .rename_session(&newest.session.session_id.to_string(), "release-candidate")
+            .expect("label newest");
+
+        let entries = engine.list_session_labels().expect("list labels");
+
+        let ids: Vec<String> = entries
+            .iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                newest.session.session_id.to_string(),
+                older.session.session_id.to_string(),
+            ],
+            "labels must be listed in newest-first order and the unlabeled session omitted"
+        );
+        assert_eq!(entries[0].label, "release-candidate");
+        assert_eq!(entries[1].label, "runtime-review");
+
+        // middle must have no label and must be absent from the listing.
+        assert!(
+            !ids.contains(&middle.session.session_id.to_string()),
+            "unlabeled middle session must be omitted"
+        );
+        assert!(
+            engine
+                .load_session(&middle.session.session_id.to_string())
+                .expect("reload middle")
+                .label
+                .is_none(),
+            "listing must not mutate persisted label state"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn list_session_labels_keeps_duplicate_labels_separate_and_returns_empty_for_unlabeled_store() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        // With no labeled sessions yet, the listing must be cleanly empty —
+        // even when unlabeled sessions exist.
+        let _ = engine.bootstrap(Prompt::new("unlabeled")).expect("bootstrap");
+        let empty = engine.list_session_labels().expect("list empty");
+        assert!(
+            empty.is_empty(),
+            "unlabeled-only store must yield empty label listing"
+        );
+
+        // Two sessions sharing the same label must both appear — ambiguity is
+        // discoverable, not collapsed.
+        let first = engine.bootstrap(Prompt::new("alpha")).expect("bootstrap alpha");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = engine.bootstrap(Prompt::new("beta")).expect("bootstrap beta");
+
+        engine
+            .rename_session(&first.session.session_id.to_string(), "dup")
+            .expect("label first");
+        engine
+            .rename_session(&second.session.session_id.to_string(), "dup")
+            .expect("label second");
+
+        let entries = engine.list_session_labels().expect("list labels");
+        assert_eq!(entries.len(), 2, "duplicate labels must not be collapsed");
+        assert!(entries.iter().all(|entry| entry.label == "dup"));
+        assert_eq!(
+            entries[0].session_id.to_string(),
+            second.session.session_id.to_string(),
+            "newest duplicate label must appear first"
+        );
+        assert_eq!(
+            entries[1].session_id.to_string(),
+            first.session.session_id.to_string(),
+            "older duplicate label must appear second"
         );
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
