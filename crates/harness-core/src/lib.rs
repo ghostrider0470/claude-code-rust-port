@@ -168,6 +168,10 @@ pub enum RuntimeError {
     SessionAlreadyUnlabeled(String),
     #[error("session already labeled: {0}")]
     SessionAlreadyLabeled(String),
+    #[error("session already pinned: {0}")]
+    SessionAlreadyPinned(String),
+    #[error("session already unpinned: {0}")]
+    SessionAlreadyUnpinned(String),
 }
 
 pub fn estimate_tokens(text: &str) -> usize {

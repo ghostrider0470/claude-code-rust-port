@@ -35,6 +35,8 @@ enum CliCommand {
         #[arg(long)]
         keep: usize,
     },
+    SessionPin { id: String },
+    SessionUnpin { id: String },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -140,6 +142,14 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("prune persisted sessions");
             serde_json::to_string_pretty(&pruned).expect("serialize session prune")
         }
+        CliCommand::SessionPin { id } => {
+            let pinned = engine.pin_session(&id).expect("pin persisted session");
+            serde_json::to_string_pretty(&pinned).expect("serialize session pin")
+        }
+        CliCommand::SessionUnpin { id } => {
+            let unpinned = engine.unpin_session(&id).expect("unpin persisted session");
+            serde_json::to_string_pretty(&unpinned).expect("serialize session unpin")
+        }
     }
 }
 
@@ -157,8 +167,8 @@ mod tests {
     use harness_runtime::RuntimeEngine;
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
-        SessionImport, SessionLabelEntry, SessionPrune, SessionRename, SessionRetag, SessionState,
-        SessionStore, SessionUnlabel, TranscriptRecord,
+        SessionImport, SessionLabelEntry, SessionPin, SessionPrune, SessionRename, SessionRetag,
+        SessionState, SessionStore, SessionUnlabel, SessionUnpin, TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -2468,6 +2478,194 @@ mod tests {
         }
 
         assert!(engine.list_sessions().expect("list after full prune").is_empty());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pin_explicit_id_matches_readme_example_and_persists_pinned_flag() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "pin me");
+        let output = render_command(
+            &engine,
+            CliCommand::SessionPin { id: id.clone() },
+        );
+
+        // Machine-readable JSON exposes the resolved session id and the pinned state.
+        let pin: SessionPin =
+            serde_json::from_str(&output).expect("parse session-pin output");
+        assert_eq!(pin.pinned_session_id.to_string(), id);
+        assert!(pin.pinned);
+        // Deterministic README block (pinned `true`, resolved id placeholder).
+        assert_eq!(
+            output.replace(&id, "<session-id>"),
+            readme_output_block("session-pin <id>", "json")
+        );
+
+        // The persisted session now carries `pinned: true` and preserves everything else.
+        let reloaded = engine.load_session(&id).expect("reload pinned");
+        assert!(reloaded.pinned);
+        assert_eq!(reloaded.messages.len(), 1);
+        // Transcript is untouched.
+        let transcript = engine.load_transcript(&id).expect("reload transcript");
+        assert_eq!(transcript.entries.len(), 1);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pin_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer");
+
+        let output = render_command(
+            &engine,
+            CliCommand::SessionPin {
+                id: "latest".to_string(),
+            },
+        );
+        let pin: SessionPin =
+            serde_json::from_str(&output).expect("parse session-pin latest output");
+        assert_eq!(pin.pinned_session_id.to_string(), newer);
+        assert!(pin.pinned);
+
+        // Newest-first ordering must be preserved — pin does NOT bump updated_at_ms.
+        let listed: Vec<String> = engine
+            .list_sessions()
+            .expect("list after pin")
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(listed.first().map(String::as_str), Some(newer.as_str()));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pin_and_unpin_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "pin by label");
+        engine
+            .rename_session(&id, "to-pin")
+            .expect("attach label before pin");
+
+        let pin_output = render_command(
+            &engine,
+            CliCommand::SessionPin {
+                id: "label:to-pin".to_string(),
+            },
+        );
+        let pin: SessionPin =
+            serde_json::from_str(&pin_output).expect("parse session-pin label output");
+        assert_eq!(pin.pinned_session_id.to_string(), id);
+        assert!(pin.pinned);
+
+        let unpin_output = render_command(
+            &engine,
+            CliCommand::SessionUnpin {
+                id: "label:to-pin".to_string(),
+            },
+        );
+        let unpin: SessionUnpin =
+            serde_json::from_str(&unpin_output).expect("parse session-unpin label output");
+        assert_eq!(unpin.unpinned_session_id.to_string(), id);
+        assert!(!unpin.pinned);
+
+        // After unpin the persisted JSON is backward-compatible (no `pinned` key).
+        let persisted_path = root.join(format!("{id}.json"));
+        let persisted =
+            std::fs::read_to_string(&persisted_path).expect("read persisted json");
+        assert!(
+            !persisted.contains("\"pinned\""),
+            "unpinned persisted JSON must not serialize `pinned`: {persisted}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_unpin_explicit_id_matches_readme_example_and_clears_pinned_flag() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "pin cycle");
+        engine.pin_session(&id).expect("pin for unpin fixture");
+
+        let output = render_command(
+            &engine,
+            CliCommand::SessionUnpin { id: id.clone() },
+        );
+        let unpin: SessionUnpin =
+            serde_json::from_str(&output).expect("parse session-unpin output");
+        assert_eq!(unpin.unpinned_session_id.to_string(), id);
+        assert!(!unpin.pinned);
+        assert_eq!(
+            output.replace(&id, "<session-id>"),
+            readme_output_block("session-unpin <id>", "json")
+        );
+
+        // Session still loads, pinned flag is cleared, transcript untouched.
+        let reloaded = engine.load_session(&id).expect("reload unpinned");
+        assert!(!reloaded.pinned);
+        let transcript = engine.load_transcript(&id).expect("reload transcript");
+        assert_eq!(transcript.entries.len(), 1);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_prune_with_pinned_session_preserves_pin_and_surfaces_pinned_preserved() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let pinned_id = bootstrap_session_id(&engine, "keep me");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let middle_id = bootstrap_session_id(&engine, "middle");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newest_id = bootstrap_session_id(&engine, "newest");
+
+        engine
+            .pin_session(&pinned_id)
+            .expect("pin oldest before prune");
+
+        let output = render_command(&engine, CliCommand::SessionPrune { keep: 1 });
+        let prune: SessionPrune =
+            serde_json::from_str(&output).expect("parse prune-with-pin output");
+
+        // Retention budget applied only to unpinned sessions: newest survives,
+        // middle is pruned, pinned oldest is rescued via pinned_preserved.
+        assert_eq!(prune.kept_count, 1);
+        assert_eq!(prune.pruned_count, 1);
+        assert_eq!(prune.removed[0].session_id.to_string(), middle_id);
+        assert_eq!(prune.pinned_preserved_count, 1);
+        assert_eq!(
+            prune.pinned_preserved,
+            vec![engine
+                .load_session(&pinned_id)
+                .expect("load pinned")
+                .session_id]
+        );
+
+        // Survivors: newest + pinned-oldest. Middle is gone from disk and from listing.
+        let remaining: Vec<String> = engine
+            .list_sessions()
+            .expect("list after pin-aware prune")
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(remaining, vec![newest_id.clone(), pinned_id.clone()]);
+        assert!(!root.join(format!("{middle_id}.json")).exists());
+        assert!(!root
+            .join(format!("{middle_id}.transcript.json"))
+            .exists());
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
