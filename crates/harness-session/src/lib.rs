@@ -484,6 +484,15 @@ pub struct SessionTranscriptFirstTurn {
     pub entry: TranscriptEntry,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptEntryCount {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -820,6 +829,28 @@ impl SessionStore {
             updated_at_ms: transcript.updated_at_ms,
             total_entries: total,
             entry,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// deterministic machine-readable summary of the resolved persisted
+    /// transcript's length without returning any transcript entries. The
+    /// persisted transcript is not mutated. An empty transcript succeeds
+    /// cleanly with `total_entries: 0`. Preserves existing selector failure
+    /// semantics unchanged (`SessionNotFound` / `AmbiguousLabel` /
+    /// `MalformedSelector`).
+    pub fn entry_count_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptEntryCount, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        Ok(SessionTranscriptEntryCount {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries: transcript.entries.len(),
         })
     }
 
