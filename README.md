@@ -512,6 +512,33 @@ cargo run -q -p harness-cli -- transcript-show latest
 }
 ```
 
+### `transcript-tail <selector>`
+
+Inspect only the newest transcript entries for a persisted session without dumping the full transcript. Accepts the same selector forms every other single-session command accepts — a raw `session_id`, `latest`, or `label:<name>` — routed through the shared selector-resolution path so behavior is identical to `session-show`, `transcript-show`, etc. `--count <n>` controls how many most-recent entries are returned; when omitted, the default is `10`. A `--count` larger than the persisted transcript simply returns every available entry, and `--count 0` returns an empty `entries` array without erroring. Output uses a deterministic shape: `{ selector, resolved_session_id, created_at_ms, updated_at_ms, total_entries, returned_entries, entries }`, where `selector` echoes the raw input, `resolved_session_id` is the persisted id the selector actually maps to, `total_entries` is the full transcript length, `returned_entries == entries.len()`, and `entries` preserves the source transcript's `turn_index` ordering so the tail slice is self-describing. Selector failure semantics are unchanged: unknown ids and unknown labels surface as `session not found`, duplicate labels surface as `ambiguous label`, and `label:` with no name surfaces as `malformed selector`. No persisted session state, transcript entry, label, pinned flag, id, path, or ordering metadata is mutated.
+
+```bash
+cargo run -q -p harness-cli -- transcript-tail <session-id>
+cargo run -q -p harness-cli -- transcript-tail latest --count 2
+cargo run -q -p harness-cli -- transcript-tail label:runtime-review --count 1
+```
+
+```json
+{
+  "selector": "<session-id>",
+  "resolved_session_id": "<session-id>",
+  "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
+  "total_entries": 1,
+  "returned_entries": 1,
+  "entries": [
+    {
+      "turn_index": 0,
+      "prompt": "review bash"
+    }
+  ]
+}
+```
+
 ### `session-export <id>`
 
 Export one persisted session as a single machine-readable JSON bundle that packages the session state and its transcript together. The output uses a deterministic shape: `{ exported_session_id, session, transcript }`, where `session` is the same structure printed by `session-show` and `transcript` is the same structure printed by `transcript-show`. The `exported_session_id` confirms which session was exported and always equals the `session_id` inside both nested records. Turn ordering in `transcript.entries` is preserved in `turn_index` order so the bundle is safe to attach to bug reports or archive outside the repo-local `.sessions/` layout.
@@ -1177,6 +1204,9 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::check_selector` behavior: routes the selector through the shared `resolve_selector` machinery, surfaces the resolved persisted session's `session_id`, `created_at_ms`, `updated_at_ms`, `message_count`, `persisted_path`, and — when present — `label` and `pinned`, leaves persisted session state, transcripts, labels, pinned flags, ids, paths, and ordering metadata untouched, and preserves existing selector failure semantics (unknown id/label → `SessionNotFound`, duplicate labels → `AmbiguousLabel`, empty `label:` → `MalformedSelector`)
 - `harness-runtime` `check_session_selector` behavior: delegates to the store so the CLI surface shares selector resolution with every other single-session command, and surfaces unknown / ambiguous / malformed selectors as distinct, descriptive errors without mutating any persisted state
 - README-backed CLI coverage for `session-selector-check <id>`, `session-selector-check latest`, and `session-selector-check label:<name>` confirming the output echoes the raw selector, identifies the resolved `session_id`, exposes recency metadata / `message_count` / `persisted_path`, surfaces `label` and `pinned: true` only when the targeted session carries them, and that unknown ids/labels, duplicate labels, and malformed label selectors fail cleanly with distinct diagnostics
+- `harness-session` `SessionStore::tail_transcript` behavior: routes the selector through the shared `resolve_selector` machinery, returns the newest `count` entries from the persisted transcript preserving `turn_index` ordering, caps a larger-than-transcript count at every available entry, treats `count == 0` as a clean empty tail, exposes `total_entries` and `returned_entries` alongside the trimmed `entries`, leaves persisted session state, transcripts, labels, pinned flags, ids, paths, and ordering metadata untouched, and preserves existing selector failure semantics (unknown id/label → `SessionNotFound`, duplicate labels → `AmbiguousLabel`, empty `label:` → `MalformedSelector`)
+- `harness-runtime` `tail_session_transcript` behavior: delegates to the store so the CLI surface shares selector resolution with every other single-session command, and surfaces unknown / ambiguous / malformed selectors as distinct, descriptive errors without mutating any persisted state
+- README-backed CLI coverage for `transcript-tail <id>`, `transcript-tail latest --count <n>`, and `transcript-tail label:<name> --count <n>` confirming the output echoes the raw selector, identifies the resolved `session_id`, reports `total_entries` / `returned_entries`, preserves `turn_index` ordering in the returned tail, handles empty transcripts and `--count` values larger than the transcript cleanly, and surfaces unknown ids/labels, duplicate labels, and malformed label selectors as distinct diagnostics without mutating persisted state
 
 Validation commands:
 
@@ -1246,3 +1276,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI session-retag for persisted sessions (`session-retag <id> <label>`, `session-retag latest <label>`, and `session-retag label:<old-name> <new-name>`) that atomically replaces the persisted `label` metadata field while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits a deterministic `{ retagged_session_id, previous_label, applied_label }` shape, fails cleanly for unknown sessions/selectors, empty/whitespace-only labels, attempts to retag a session that carries no label, and attempts where the requested label normalizes to the same effective value already present, and keeps older unlabeled sessions backward-compatible by only serializing the label field when present
 - [x] CLI session-pin / session-unpin for persisted sessions (`session-pin <id>`, `session-pin latest`, `session-pin label:<name>`, `session-unpin <id>`, `session-unpin latest`, and `session-unpin label:<name>`) that toggle a deterministic `pinned` flag on session metadata while preserving the existing `session_id`, leaving transcript entries and ordering untouched, and not bumping `updated_at_ms` so newest-first ordering stays activity-based; emits deterministic `{ pinned_session_id, pinned }` / `{ unpinned_session_id, pinned }` shapes, keeps older unpinned sessions backward-compatible by only serializing the `pinned` field when the session is actually pinned, surfaces the `pinned` flag through `sessions`, `session-show`, `session-export`, `session-compare`, and `session-labels`, and makes `session-prune --keep <count>` skip pinned sessions — apply newest-first ordering only across the unpinned subset and report rescued pins via a new `pinned_preserved_count` and `pinned_preserved` pair on the prune output
 - [x] CLI session-selector-check for persisted sessions (`session-selector-check <id>`, `session-selector-check latest`, and `session-selector-check label:<name>`) that routes the selector through the shared selector-resolution path and surfaces the resolved persisted session's descriptive metadata without mutating session state, transcript entries, labels, pinned flags, ids, paths, or ordering metadata; emits a deterministic `{ selector, resolved_session_id, created_at_ms, updated_at_ms, message_count, persisted_path, label?, pinned? }` shape where `selector` echoes the raw input, `label` only appears when the targeted session carries one, and `pinned` only appears when `true`; preserves existing selector failure semantics unchanged (unknown id/label → `session not found`, duplicate labels → `ambiguous label`, empty `label:` → `malformed selector`)
+- [x] CLI transcript-tail for persisted sessions (`transcript-tail <id>`, `transcript-tail latest`, and `transcript-tail label:<name>`, with an optional `--count <n>` that defaults to `10`) that routes the selector through the shared selector-resolution path and returns the newest transcript entries for the resolved session without mutating any persisted state; emits a deterministic `{ selector, resolved_session_id, created_at_ms, updated_at_ms, total_entries, returned_entries, entries }` shape where `selector` echoes the raw input, `entries` preserves `turn_index` ordering within the returned tail slice, a `--count` larger than the transcript returns every available entry, and an empty transcript or `--count 0` returns an empty `entries` array cleanly; preserves existing selector failure semantics unchanged (unknown id/label → `session not found`, duplicate labels → `ambiguous label`, empty `label:` → `malformed selector`)

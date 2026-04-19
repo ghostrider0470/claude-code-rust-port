@@ -385,6 +385,22 @@ pub struct SessionSelectorCheck {
     pub pinned: bool,
 }
 
+/// Default number of transcript entries returned by `tail_transcript` when the
+/// caller does not specify an explicit count. Kept stable so CLI scripts can
+/// rely on the documented contract.
+pub const DEFAULT_TRANSCRIPT_TAIL_COUNT: usize = 10;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptTail {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub returned_entries: usize,
+    pub entries: Vec<TranscriptEntry>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -471,6 +487,33 @@ impl SessionStore {
             persisted_path: persisted_path.display().to_string(),
             label: session.label.clone(),
             pinned: session.pinned,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return the
+    /// newest `count` transcript entries for the matching persisted session in
+    /// their original `turn_index` order. The persisted transcript is not
+    /// mutated. `count` larger than the transcript length simply returns every
+    /// available entry. Preserves existing selector failure semantics unchanged
+    /// (`SessionNotFound` / `AmbiguousLabel` / `MalformedSelector`).
+    pub fn tail_transcript(
+        &self,
+        selector: &str,
+        count: usize,
+    ) -> Result<SessionTranscriptTail, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total = transcript.entries.len();
+        let start = total.saturating_sub(count);
+        let entries = transcript.entries[start..].to_vec();
+        Ok(SessionTranscriptTail {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries: total,
+            returned_entries: entries.len(),
+            entries,
         })
     }
 
