@@ -473,6 +473,17 @@ pub struct SessionTranscriptLastTurn {
     pub entry: TranscriptEntry,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptFirstTurn {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub turn_index: usize,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub entry: TranscriptEntry,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -772,6 +783,39 @@ impl SessionStore {
             selector: selector.to_string(),
             resolved_session_id: transcript.session_id,
             turn_index: last_index,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries: total,
+            entry,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return the
+    /// single persisted transcript entry with the lowest available
+    /// `turn_index` for the matching session. The persisted transcript is not
+    /// mutated. An empty transcript has no first turn and therefore fails
+    /// cleanly and deterministically with `TranscriptTurnOutOfRange` rather
+    /// than masking the miss as a silent empty result, because the command's
+    /// contract is to return exactly one entry. Preserves existing selector
+    /// failure semantics unchanged (`SessionNotFound` / `AmbiguousLabel` /
+    /// `MalformedSelector`).
+    pub fn first_turn_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptFirstTurn, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total = transcript.entries.len();
+        if total == 0 {
+            return Err(RuntimeError::TranscriptTurnOutOfRange(format!(
+                "no first turn in transcript of length {total}"
+            )));
+        }
+        let entry = transcript.entries[0].clone();
+        Ok(SessionTranscriptFirstTurn {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            turn_index: 0,
             created_at_ms: transcript.created_at_ms,
             updated_at_ms: transcript.updated_at_ms,
             total_entries: total,
