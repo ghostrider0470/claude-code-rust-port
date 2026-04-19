@@ -79,6 +79,9 @@ enum CliCommand {
     TranscriptFirstTurn {
         selector: String,
     },
+    TranscriptEntryCount {
+        selector: String,
+    },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -255,6 +258,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("first-turn persisted session transcript");
             serde_json::to_string_pretty(&first_turn).expect("serialize transcript first-turn")
         }
+        CliCommand::TranscriptEntryCount { selector } => {
+            let entry_count = engine
+                .entry_count_session_transcript(&selector)
+                .expect("entry-count persisted session transcript");
+            serde_json::to_string_pretty(&entry_count).expect("serialize transcript entry-count")
+        }
     }
 }
 
@@ -274,9 +283,9 @@ mod tests {
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
         SessionImport, SessionLabelEntry, SessionPin, SessionPinEntry, SessionPrune, SessionRename,
         SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionTranscriptContext,
-        SessionTranscriptFind, SessionTranscriptFirstTurn, SessionTranscriptLastTurn,
-        SessionTranscriptRange, SessionTranscriptTail, SessionTranscriptTurnShow, SessionUnlabel,
-        SessionUnpin,
+        SessionTranscriptEntryCount, SessionTranscriptFind, SessionTranscriptFirstTurn,
+        SessionTranscriptLastTurn, SessionTranscriptRange, SessionTranscriptTail,
+        SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin,
         TranscriptRecord,
         DEFAULT_TRANSCRIPT_CONTEXT_WINDOW, DEFAULT_TRANSCRIPT_RANGE_COUNT,
         DEFAULT_TRANSCRIPT_TAIL_COUNT,
@@ -5047,4 +5056,206 @@ mod tests {
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
+
+    #[test]
+    fn transcript_entry_count_raw_id_returns_length_and_leaves_transcript_untouched() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let before_session = engine.load_session(&id).expect("reload session");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptEntryCount {
+                selector: id.clone(),
+            },
+        );
+        let count: SessionTranscriptEntryCount =
+            serde_json::from_str(&output).expect("parse transcript-entry-count output");
+
+        assert_eq!(count.selector, id);
+        assert_eq!(count.resolved_session_id.to_string(), id);
+        assert_eq!(count.total_entries, 3);
+        assert_eq!(count.created_at_ms, before_transcript.created_at_ms);
+        assert_eq!(count.updated_at_ms, before_transcript.updated_at_ms);
+
+        let after_transcript = engine
+            .load_transcript(&id)
+            .expect("reload after entry-count");
+        assert_eq!(after_transcript, before_transcript);
+        let after_session = engine.load_session(&id).expect("reload session after");
+        assert_eq!(after_session, before_session);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_entry_count_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer first");
+        extend_transcript(&engine, &newer, &["newer follow-up", "newer third"]);
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptEntryCount {
+                selector: "latest".to_string(),
+            },
+        );
+        let count: SessionTranscriptEntryCount =
+            serde_json::from_str(&output).expect("parse transcript-entry-count latest output");
+
+        assert_eq!(count.selector, "latest");
+        assert_eq!(count.resolved_session_id.to_string(), newer);
+        assert_eq!(count.total_entries, 3);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_entry_count_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled first");
+        extend_transcript(&engine, &id, &["labeled follow-up", "labeled third"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for entry-count");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptEntryCount {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let count: SessionTranscriptEntryCount =
+            serde_json::from_str(&output).expect("parse transcript-entry-count label output");
+
+        assert_eq!(count.selector, "label:runtime-review");
+        assert_eq!(count.resolved_session_id.to_string(), id);
+        assert_eq!(count.total_entries, 3);
+
+        let reloaded = engine.load_session(&id).expect("reload after entry-count");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_entry_count_empty_transcript_returns_zero_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        let count = engine
+            .entry_count_session_transcript(&session_id)
+            .expect("empty transcript should succeed");
+        assert_eq!(count.selector, session_id);
+        assert_eq!(count.resolved_session_id.to_string(), session_id);
+        assert_eq!(count.total_entries, 0);
+        assert_eq!(count.created_at_ms, session.created_at_ms);
+        assert_eq!(count.updated_at_ms, session.updated_at_ms);
+
+        let after = engine
+            .load_transcript(&session_id)
+            .expect("reload empty transcript");
+        assert_eq!(after, empty_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_entry_count_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .entry_count_session_transcript("00000000-0000-0000-0000-000000000000")
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .entry_count_session_transcript("label:nonexistent")
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        assert!(engine.load_session(&anchor).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_entry_count_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
+
+        let err = engine
+            .entry_count_session_transcript("label:duplicate")
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_entry_count_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .entry_count_session_transcript("label:")
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
 }
