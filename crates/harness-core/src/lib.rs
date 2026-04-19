@@ -166,6 +166,8 @@ pub enum RuntimeError {
     MalformedSelector(String),
     #[error("session already unlabeled: {0}")]
     SessionAlreadyUnlabeled(String),
+    #[error("session already labeled: {0}")]
+    SessionAlreadyLabeled(String),
 }
 
 pub fn estimate_tokens(text: &str) -> usize {

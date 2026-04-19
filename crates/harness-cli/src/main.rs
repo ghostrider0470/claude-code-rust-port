@@ -29,6 +29,7 @@ enum CliCommand {
     SessionFork { id: String, prompt: String },
     SessionRename { id: String, label: String },
     SessionUnlabel { id: String },
+    SessionRetag { id: String, label: String },
     SessionLabels,
 }
 
@@ -117,6 +118,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("unlabel persisted session");
             serde_json::to_string_pretty(&unlabeled).expect("serialize session unlabel")
         }
+        CliCommand::SessionRetag { id, label } => {
+            let retagged = engine
+                .retag_session(&id, &label)
+                .expect("retag persisted session");
+            serde_json::to_string_pretty(&retagged).expect("serialize session retag")
+        }
         CliCommand::SessionLabels => {
             let labels = engine
                 .list_session_labels()
@@ -140,7 +147,7 @@ mod tests {
     use harness_runtime::RuntimeEngine;
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
-        SessionImport, SessionLabelEntry, SessionRename, SessionState, SessionStore,
+        SessionImport, SessionLabelEntry, SessionRename, SessionRetag, SessionState, SessionStore,
         SessionUnlabel, TranscriptRecord,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
@@ -1954,6 +1961,310 @@ mod tests {
             .load_session(&session_id)
             .expect("reload session after failed unlabel");
         assert!(reloaded.label.is_none());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_retag_explicit_id_matches_readme_example_and_replaces_label_without_touching_transcript(
+    ) {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let session_before = engine
+            .load_session(&session_id)
+            .expect("load session after rename");
+        let transcript_before = engine
+            .load_transcript(&session_id)
+            .expect("load transcript after rename");
+        assert_eq!(session_before.label.as_deref(), Some("runtime-review"));
+
+        let retag_output = render_command(
+            &engine,
+            CliCommand::SessionRetag {
+                id: session_id.clone(),
+                label: "release-candidate".to_string(),
+            },
+        );
+
+        let retagged: SessionRetag =
+            serde_json::from_str(&retag_output).expect("parse session-retag output");
+        assert_eq!(retagged.retagged_session_id.to_string(), session_id);
+        assert_eq!(retagged.previous_label, "runtime-review");
+        assert_eq!(retagged.applied_label, "release-candidate");
+
+        let reloaded = engine
+            .load_session(&session_id)
+            .expect("reload session after retag");
+        assert_eq!(reloaded.label.as_deref(), Some("release-candidate"));
+        assert_eq!(
+            reloaded.updated_at_ms, session_before.updated_at_ms,
+            "retag must not bump activity metadata"
+        );
+        assert_eq!(
+            reloaded.created_at_ms, session_before.created_at_ms,
+            "retag must not rewrite creation metadata"
+        );
+        assert_eq!(reloaded.messages, session_before.messages);
+
+        let transcript_after = engine
+            .load_transcript(&session_id)
+            .expect("reload transcript after retag");
+        assert_eq!(
+            transcript_after, transcript_before,
+            "retag must not mutate transcript entries or ordering"
+        );
+
+        assert_eq!(
+            normalize_session_output(&retag_output, &session_id),
+            readme_output_block("session-retag <id> <label>", "json")
+        );
+
+        // session-labels reflects the new label and no longer surfaces the old one.
+        let labels_output = render_command(&engine, CliCommand::SessionLabels);
+        let labels: Vec<SessionLabelEntry> =
+            serde_json::from_str(&labels_output).expect("parse session-labels");
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].label, "release-candidate");
+        assert_eq!(labels[0].session_id.to_string(), session_id);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_retag_latest_selector_targets_most_recent_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let latest_output = render_command(
+            &engine,
+            CliCommand::SessionRetag {
+                id: "latest".to_string(),
+                label: "release-candidate".to_string(),
+            },
+        );
+
+        let retagged: SessionRetag =
+            serde_json::from_str(&latest_output).expect("parse session-retag latest output");
+        assert_eq!(retagged.retagged_session_id.to_string(), session_id);
+        assert_eq!(retagged.previous_label, "runtime-review");
+        assert_eq!(retagged.applied_label, "release-candidate");
+
+        assert_eq!(
+            normalize_session_output(&latest_output, &session_id),
+            readme_output_block("session-retag latest <label>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_retag_label_selector_resolves_and_updates_session_labels_without_touching_transcript(
+    ) {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let session_before = engine
+            .load_session(&session_id)
+            .expect("load session before label-selector retag");
+        let transcript_before = engine
+            .load_transcript(&session_id)
+            .expect("load transcript before label-selector retag");
+
+        let label_output = render_command(
+            &engine,
+            CliCommand::SessionRetag {
+                id: "label:runtime-review".to_string(),
+                label: "release-candidate".to_string(),
+            },
+        );
+
+        let retagged: SessionRetag =
+            serde_json::from_str(&label_output).expect("parse label-selector retag output");
+        assert_eq!(
+            retagged.retagged_session_id.to_string(),
+            session_id,
+            "label selector must resolve to the labeled session id, not the selector string"
+        );
+        assert_eq!(retagged.previous_label, "runtime-review");
+        assert_eq!(retagged.applied_label, "release-candidate");
+        assert!(
+            !label_output.contains("label:runtime-review"),
+            "JSON output must surface the resolved session id, not the selector string: {label_output}"
+        );
+
+        // session-labels reflects the new label while transcript/session content
+        // and ordering stay unchanged.
+        let labels_output = render_command(&engine, CliCommand::SessionLabels);
+        let labels: Vec<SessionLabelEntry> =
+            serde_json::from_str(&labels_output).expect("parse session-labels after retag");
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].label, "release-candidate");
+        assert_eq!(labels[0].session_id.to_string(), session_id);
+
+        let transcript_after = engine
+            .load_transcript(&session_id)
+            .expect("reload transcript after retag");
+        assert_eq!(
+            transcript_after, transcript_before,
+            "retag must not mutate transcript entries or ordering"
+        );
+
+        let reloaded = engine
+            .load_session(&session_id)
+            .expect("reload session after retag");
+        assert_eq!(reloaded.label.as_deref(), Some("release-candidate"));
+        assert_eq!(
+            reloaded.updated_at_ms, session_before.updated_at_ms,
+            "retag must not bump activity metadata"
+        );
+        assert_eq!(reloaded.messages, session_before.messages);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_retag_rejects_same_effective_label_unknown_session_and_invalid_label_without_touching_store(
+    ) {
+        use harness_core::SessionId;
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let session_before = engine
+            .load_session(&session_id)
+            .expect("load session before failed retag attempts");
+        let transcript_before = engine
+            .load_transcript(&session_id)
+            .expect("load transcript before failed retag attempts");
+
+        // Same effective label (including surrounding whitespace that normalizes away).
+        let same_err = engine
+            .retag_session(&session_id, "  runtime-review  ")
+            .expect_err("same-effective-label retag must fail");
+        assert!(
+            same_err.contains("session already labeled"),
+            "same-effective-label retag must surface SessionAlreadyLabeled diagnostic: {same_err}"
+        );
+        assert!(
+            same_err.contains(&session_id),
+            "same-effective-label error must surface the resolved session id: {same_err}"
+        );
+
+        // Empty/whitespace-only labels.
+        for invalid in ["", "   ", "\t\n"] {
+            let result = engine.retag_session(&session_id, invalid);
+            assert!(
+                result.is_err(),
+                "empty/whitespace label must fail to retag"
+            );
+        }
+
+        // Unknown session id.
+        let missing = SessionId::new().to_string();
+        let unknown_err = engine
+            .retag_session(&missing, "anything")
+            .expect_err("unknown session id must fail");
+        assert!(
+            unknown_err.contains("session not found"),
+            "unknown id must surface SessionNotFound diagnostic: {unknown_err}"
+        );
+
+        // The seeded labeled session is untouched by every failure above.
+        let reloaded = engine
+            .load_session(&session_id)
+            .expect("reload session after failed retags");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+        assert_eq!(reloaded.updated_at_ms, session_before.updated_at_ms);
+        assert_eq!(reloaded.messages, session_before.messages);
+        let transcript_after = engine
+            .load_transcript(&session_id)
+            .expect("reload transcript after failed retags");
+        assert_eq!(transcript_after, transcript_before);
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
