@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use harness_core::Prompt;
 use harness_runtime::RuntimeEngine;
+use harness_session::DEFAULT_TRANSCRIPT_TAIL_COUNT;
 
 #[derive(Debug, Parser)]
 #[command(name = "harness")]
@@ -39,6 +40,11 @@ enum CliCommand {
     SessionPin { id: String },
     SessionUnpin { id: String },
     SessionSelectorCheck { selector: String },
+    TranscriptTail {
+        selector: String,
+        #[arg(long, default_value_t = DEFAULT_TRANSCRIPT_TAIL_COUNT)]
+        count: usize,
+    },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -164,6 +170,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("check persisted session selector");
             serde_json::to_string_pretty(&check).expect("serialize session selector check")
         }
+        CliCommand::TranscriptTail { selector, count } => {
+            let tail = engine
+                .tail_session_transcript(&selector, count)
+                .expect("tail persisted session transcript");
+            serde_json::to_string_pretty(&tail).expect("serialize transcript tail")
+        }
     }
 }
 
@@ -182,8 +194,8 @@ mod tests {
     use harness_session::{
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
         SessionImport, SessionLabelEntry, SessionPin, SessionPinEntry, SessionPrune, SessionRename,
-        SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionUnlabel,
-        SessionUnpin, TranscriptRecord,
+        SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionTranscriptTail,
+        SessionUnlabel, SessionUnpin, TranscriptRecord, DEFAULT_TRANSCRIPT_TAIL_COUNT,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -3045,6 +3057,233 @@ mod tests {
 
         let err = engine
             .check_session_selector("label:")
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    fn extend_transcript(engine: &RuntimeEngine, id: &str, prompts: &[&str]) {
+        for prompt in prompts {
+            render_command(
+                engine,
+                CliCommand::Resume {
+                    id: id.to_string(),
+                    prompt: (*prompt).to_string(),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_tail_raw_id_truncates_to_count_and_preserves_turn_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt", "fourth prompt"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTail {
+                selector: id.clone(),
+                count: 2,
+            },
+        );
+        let tail: SessionTranscriptTail =
+            serde_json::from_str(&output).expect("parse transcript-tail output");
+
+        assert_eq!(tail.selector, id);
+        assert_eq!(tail.resolved_session_id.to_string(), id);
+        assert_eq!(tail.total_entries, 4);
+        assert_eq!(tail.returned_entries, 2);
+        let returned_prompts: Vec<&str> =
+            tail.entries.iter().map(|entry| entry.prompt.0.as_str()).collect();
+        assert_eq!(returned_prompts, vec!["third prompt", "fourth prompt"]);
+        let returned_indices: Vec<usize> =
+            tail.entries.iter().map(|entry| entry.turn_index.0).collect();
+        assert_eq!(returned_indices, vec![2, 3]);
+
+        let after_transcript = engine.load_transcript(&id).expect("reload after tail");
+        assert_eq!(after_transcript, before_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_tail_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer transcript");
+        extend_transcript(&engine, &newer, &["newer follow-up"]);
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTail {
+                selector: "latest".to_string(),
+                count: 1,
+            },
+        );
+        let tail: SessionTranscriptTail =
+            serde_json::from_str(&output).expect("parse transcript-tail latest output");
+
+        assert_eq!(tail.selector, "latest");
+        assert_eq!(tail.resolved_session_id.to_string(), newer);
+        assert_eq!(tail.total_entries, 2);
+        assert_eq!(tail.returned_entries, 1);
+        assert_eq!(tail.entries.len(), 1);
+        assert_eq!(tail.entries[0].turn_index.0, 1);
+        assert_eq!(tail.entries[0].prompt.0, "newer follow-up");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_tail_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled transcript");
+        extend_transcript(&engine, &id, &["labeled follow-up"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for tail");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTail {
+                selector: "label:runtime-review".to_string(),
+                count: DEFAULT_TRANSCRIPT_TAIL_COUNT,
+            },
+        );
+        let tail: SessionTranscriptTail =
+            serde_json::from_str(&output).expect("parse transcript-tail label output");
+
+        assert_eq!(tail.selector, "label:runtime-review");
+        assert_eq!(tail.resolved_session_id.to_string(), id);
+        assert_eq!(tail.total_entries, 2);
+        assert_eq!(tail.returned_entries, 2);
+        let prompts: Vec<&str> =
+            tail.entries.iter().map(|entry| entry.prompt.0.as_str()).collect();
+        assert_eq!(prompts, vec!["labeled transcript", "labeled follow-up"]);
+
+        let reloaded = engine.load_session(&id).expect("reload after tail");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_tail_count_larger_than_transcript_returns_all_entries() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "only prompt");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTail {
+                selector: id.clone(),
+                count: 99,
+            },
+        );
+        let tail: SessionTranscriptTail =
+            serde_json::from_str(&output).expect("parse transcript-tail output");
+
+        assert_eq!(tail.total_entries, 1);
+        assert_eq!(tail.returned_entries, 1);
+        assert_eq!(tail.entries.len(), 1);
+        assert_eq!(tail.entries[0].turn_index.0, 0);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_tail_count_zero_returns_empty_entries_without_erroring() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt"]);
+
+        let tail = engine
+            .tail_session_transcript(&id, 0)
+            .expect("count=0 should succeed");
+
+        assert_eq!(tail.total_entries, 2);
+        assert_eq!(tail.returned_entries, 0);
+        assert!(tail.entries.is_empty());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_tail_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .tail_session_transcript("00000000-0000-0000-0000-000000000000", 5)
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .tail_session_transcript("label:nonexistent", 5)
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        assert!(engine.load_session(&anchor).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_tail_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine.rename_session(&first, "duplicate").expect("label first");
+        engine.rename_session(&second, "duplicate").expect("label second");
+
+        let err = engine
+            .tail_session_transcript("label:duplicate", 5)
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_tail_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .tail_session_transcript("label:", 5)
             .expect_err("empty label should fail");
         assert!(
             err.contains("malformed session selector"),
