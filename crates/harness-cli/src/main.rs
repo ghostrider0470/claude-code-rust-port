@@ -73,6 +73,9 @@ enum CliCommand {
         #[arg(long)]
         turn: usize,
     },
+    TranscriptLastTurn {
+        selector: String,
+    },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -237,6 +240,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("turn-show persisted session transcript");
             serde_json::to_string_pretty(&turn_show).expect("serialize transcript turn-show")
         }
+        CliCommand::TranscriptLastTurn { selector } => {
+            let last_turn = engine
+                .last_turn_session_transcript(&selector)
+                .expect("last-turn persisted session transcript");
+            serde_json::to_string_pretty(&last_turn).expect("serialize transcript last-turn")
+        }
     }
 }
 
@@ -256,8 +265,9 @@ mod tests {
         SessionComparison, SessionDeletion, SessionExport, SessionFindResult, SessionFork,
         SessionImport, SessionLabelEntry, SessionPin, SessionPinEntry, SessionPrune, SessionRename,
         SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionTranscriptContext,
-        SessionTranscriptFind, SessionTranscriptRange, SessionTranscriptTail,
-        SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin, TranscriptRecord,
+        SessionTranscriptFind, SessionTranscriptLastTurn, SessionTranscriptRange,
+        SessionTranscriptTail, SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin,
+        TranscriptRecord,
         DEFAULT_TRANSCRIPT_CONTEXT_WINDOW, DEFAULT_TRANSCRIPT_RANGE_COUNT,
         DEFAULT_TRANSCRIPT_TAIL_COUNT,
     };
@@ -4567,6 +4577,231 @@ mod tests {
 
         let err = engine
             .turn_show_session_transcript("label:", 0)
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_last_turn_raw_id_returns_newest_entry_and_leaves_transcript_untouched() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptLastTurn {
+                selector: id.clone(),
+            },
+        );
+        let last_turn: SessionTranscriptLastTurn =
+            serde_json::from_str(&output).expect("parse transcript-last-turn output");
+
+        assert_eq!(last_turn.selector, id);
+        assert_eq!(last_turn.resolved_session_id.to_string(), id);
+        assert_eq!(last_turn.turn_index, 2);
+        assert_eq!(last_turn.total_entries, 3);
+        assert_eq!(last_turn.entry.turn_index.0, 2);
+        assert_eq!(last_turn.entry.prompt.0, "third prompt");
+
+        let after_transcript = engine.load_transcript(&id).expect("reload after last-turn");
+        assert_eq!(after_transcript, before_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_last_turn_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer transcript");
+        extend_transcript(&engine, &newer, &["newer follow-up", "newer third"]);
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptLastTurn {
+                selector: "latest".to_string(),
+            },
+        );
+        let last_turn: SessionTranscriptLastTurn =
+            serde_json::from_str(&output).expect("parse transcript-last-turn latest output");
+
+        assert_eq!(last_turn.selector, "latest");
+        assert_eq!(last_turn.resolved_session_id.to_string(), newer);
+        assert_eq!(last_turn.turn_index, 2);
+        assert_eq!(last_turn.total_entries, 3);
+        assert_eq!(last_turn.entry.turn_index.0, 2);
+        assert_eq!(last_turn.entry.prompt.0, "newer third");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_last_turn_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled transcript");
+        extend_transcript(&engine, &id, &["labeled follow-up", "labeled third"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for last-turn");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptLastTurn {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let last_turn: SessionTranscriptLastTurn =
+            serde_json::from_str(&output).expect("parse transcript-last-turn label output");
+
+        assert_eq!(last_turn.selector, "label:runtime-review");
+        assert_eq!(last_turn.resolved_session_id.to_string(), id);
+        assert_eq!(last_turn.turn_index, 2);
+        assert_eq!(last_turn.total_entries, 3);
+        assert_eq!(last_turn.entry.turn_index.0, 2);
+        assert_eq!(last_turn.entry.prompt.0, "labeled third");
+
+        let reloaded = engine.load_session(&id).expect("reload after last-turn");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_last_turn_single_entry_transcript_returns_that_entry() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "only prompt");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptLastTurn {
+                selector: id.clone(),
+            },
+        );
+        let last_turn: SessionTranscriptLastTurn =
+            serde_json::from_str(&output).expect("parse transcript-last-turn single output");
+
+        assert_eq!(last_turn.turn_index, 0);
+        assert_eq!(last_turn.total_entries, 1);
+        assert_eq!(last_turn.entry.turn_index.0, 0);
+        assert_eq!(last_turn.entry.prompt.0, "only prompt");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_last_turn_empty_transcript_surfaces_turn_out_of_range() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        let err = engine
+            .last_turn_session_transcript(&session_id)
+            .expect_err("empty transcript should fail");
+        assert!(
+            err.contains("transcript turn out of range"),
+            "expected turn out of range error, got: {err}"
+        );
+        assert!(
+            err.contains("length 0"),
+            "expected error to mention transcript length 0, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_last_turn_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .last_turn_session_transcript("00000000-0000-0000-0000-000000000000")
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .last_turn_session_transcript("label:nonexistent")
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        assert!(engine.load_session(&anchor).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_last_turn_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
+
+        let err = engine
+            .last_turn_session_transcript("label:duplicate")
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_last_turn_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .last_turn_session_transcript("label:")
             .expect_err("empty label should fail");
         assert!(
             err.contains("malformed session selector"),

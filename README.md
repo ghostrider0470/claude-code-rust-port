@@ -651,6 +651,31 @@ cargo run -q -p harness-cli -- transcript-turn-show label:runtime-review --turn 
 }
 ```
 
+### `transcript-last-turn <selector>`
+
+Inspect the newest persisted transcript entry for a single session — the one whose `turn_index` is the highest available. Useful as a quick "what did I ask last?" drill-down that avoids having to first discover `total_entries` via `transcript-tail` and then subtract one to call `transcript-turn-show`. Accepts the same selector forms every other single-session command accepts — a raw `session_id`, `latest`, or `label:<name>` — routed through the shared selector-resolution path so behavior is identical to `session-show`, `transcript-show`, `transcript-tail`, `transcript-find`, `transcript-range`, `transcript-turn-show`, `transcript-context`, etc. The search is scoped to the resolved session's persisted transcript only. Output uses a deterministic shape: `{ selector, resolved_session_id, turn_index, created_at_ms, updated_at_ms, total_entries, entry }`, where `selector` echoes the raw input, `resolved_session_id` is the persisted id the selector actually maps to, `turn_index` is the newest transcript `turn_index` present, `total_entries` is the full transcript length, and `entry` carries at least `turn_index` and `prompt`. Because the contract is to return exactly one entry, an empty transcript has no last turn and fails cleanly and deterministically as `transcript turn out of range` rather than silently returning nothing. Selector failure semantics are unchanged: unknown ids and unknown labels surface as `session not found`, duplicate labels surface as `ambiguous label`, and `label:` with no name surfaces as `malformed selector`. No persisted session state, transcript entry, label, pinned flag, id, path, or ordering metadata is mutated.
+
+```bash
+cargo run -q -p harness-cli -- transcript-last-turn <session-id>
+cargo run -q -p harness-cli -- transcript-last-turn latest
+cargo run -q -p harness-cli -- transcript-last-turn label:runtime-review
+```
+
+```json
+{
+  "selector": "<session-id>",
+  "resolved_session_id": "<session-id>",
+  "turn_index": 2,
+  "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
+  "total_entries": 3,
+  "entry": {
+    "turn_index": 2,
+    "prompt": "third prompt"
+  }
+}
+```
+
 ### `session-export <id>`
 
 Export one persisted session as a single machine-readable JSON bundle that packages the session state and its transcript together. The output uses a deterministic shape: `{ exported_session_id, session, transcript }`, where `session` is the same structure printed by `session-show` and `transcript` is the same structure printed by `transcript-show`. The `exported_session_id` confirms which session was exported and always equals the `session_id` inside both nested records. Turn ordering in `transcript.entries` is preserved in `turn_index` order so the bundle is safe to attach to bug reports or archive outside the repo-local `.sessions/` layout.
