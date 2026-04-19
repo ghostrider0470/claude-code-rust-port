@@ -100,6 +100,23 @@ impl TranscriptRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionExport {
+    pub exported_session_id: SessionId,
+    pub session: SessionState,
+    pub transcript: TranscriptRecord,
+}
+
+impl SessionExport {
+    pub fn new(session: SessionState, transcript: TranscriptRecord) -> Self {
+        Self {
+            exported_session_id: session.session_id.clone(),
+            session,
+            transcript,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListing {
     pub session_id: SessionId,
     pub created_at_ms: u64,
@@ -236,7 +253,7 @@ impl SessionStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionState, SessionStore, TranscriptRecord, TranscriptStore};
+    use super::{SessionExport, SessionState, SessionStore, TranscriptRecord, TranscriptStore};
     use harness_core::{Prompt, SessionId};
     use std::collections::BTreeMap;
     use std::fs;
@@ -507,6 +524,54 @@ mod tests {
         assert_eq!(latest.entries[0].prompt.0, "summary");
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn session_export_bundles_session_and_transcript_and_confirms_id() {
+        let session = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_050,
+            messages: vec![Prompt::new("review bash"), Prompt::new("summary please")],
+            usage: harness_core::UsageSummary {
+                input_tokens: 4,
+                output_tokens: 4,
+            },
+        };
+
+        let mut transcript = TranscriptStore::default();
+        transcript.append(Prompt::new("review bash"));
+        transcript.append(Prompt::new("summary please"));
+        let record = TranscriptRecord::from_session(&session, &transcript);
+
+        let export = SessionExport::new(session.clone(), record.clone());
+
+        assert_eq!(export.exported_session_id, session.session_id);
+        assert_eq!(export.session, session);
+        assert_eq!(export.transcript, record);
+
+        let serialized = serde_json::to_string(&export).expect("serialize export");
+        let ordered: Vec<(usize, String)> = export
+            .transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                (0, "review bash".to_string()),
+                (1, "summary please".to_string()),
+            ],
+            "export transcript must preserve turn ordering"
+        );
+
+        let again = serde_json::to_string(&export).expect("serialize export again");
+        assert_eq!(serialized, again, "export serialization should be deterministic");
+
+        let roundtrip: SessionExport =
+            serde_json::from_str(&serialized).expect("deserialize export");
+        assert_eq!(roundtrip, export);
     }
 
     #[test]

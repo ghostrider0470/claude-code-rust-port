@@ -179,6 +179,7 @@ Session and transcript concerns:
 - `TranscriptEntry`
 - `TranscriptStore`
 - `TranscriptRecord` (on-disk transcript format: `session_id`, `created_at_ms`, `updated_at_ms`, ordered `entries`)
+- `SessionExport` (deterministic export bundle: `exported_session_id`, `session`, `transcript`; bundles session state with its transcript for archival, sharing, or debugging)
 - `SessionStore`
 - recency metadata for persisted sessions (`created_at_ms`) plus activity metadata (`updated_at_ms`) that bumps on resume so `latest` follows the most recently active session
 - compaction policy
@@ -224,6 +225,7 @@ User-facing CLI:
 - `session show <id>`
 - `session show latest`
 - `transcript show <id>` and `transcript show latest` (machine-readable JSON transcript inspection that restates the owning session id and preserves turn ordering)
+- `session-export <id>` and `session-export latest` (deterministic JSON export bundle that packages session state plus transcript together; output confirms the exported session id and preserves turn ordering)
 
 ## Structured Event Model
 

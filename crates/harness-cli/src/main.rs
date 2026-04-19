@@ -21,6 +21,7 @@ enum CliCommand {
     Sessions,
     SessionShow { id: String },
     TranscriptShow { id: String },
+    SessionExport { id: String },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -62,6 +63,10 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("load transcript by id");
             serde_json::to_string_pretty(&transcript).expect("serialize transcript")
         }
+        CliCommand::SessionExport { id } => {
+            let export = engine.export_session(&id).expect("export persisted session");
+            serde_json::to_string_pretty(&export).expect("serialize session export")
+        }
     }
 }
 
@@ -77,7 +82,7 @@ mod tests {
     use super::{render_command, CliCommand};
     use harness_commands::CommandRegistry;
     use harness_runtime::RuntimeEngine;
-    use harness_session::{SessionState, SessionStore, TranscriptRecord};
+    use harness_session::{SessionExport, SessionState, SessionStore, TranscriptRecord};
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -437,6 +442,105 @@ mod tests {
         assert_eq!(
             normalize_session_output(&latest_output, &session_id),
             readme_output_block("transcript-show latest", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_export_matches_readme_example_and_confirms_session_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let export_output = render_command(
+            &engine,
+            CliCommand::SessionExport {
+                id: session_id.clone(),
+            },
+        );
+
+        let export: SessionExport =
+            serde_json::from_str(&export_output).expect("parse session-export output");
+        assert_eq!(
+            export.exported_session_id.to_string(),
+            session_id,
+            "export output must confirm the targeted session id"
+        );
+        assert_eq!(
+            export.session.session_id.to_string(),
+            session_id,
+            "nested session id must match the exported id"
+        );
+        assert_eq!(
+            export.transcript.session_id.to_string(),
+            session_id,
+            "nested transcript session id must match the exported id"
+        );
+        let ordered: Vec<(usize, String)> = export
+            .transcript
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![(0, "review bash".to_string())],
+            "exported transcript must preserve turn ordering"
+        );
+
+        assert_eq!(
+            normalize_session_output(&export_output, &session_id),
+            readme_output_block("session-export <id>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_export_latest_matches_readme_example() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let latest_output = render_command(
+            &engine,
+            CliCommand::SessionExport {
+                id: "latest".to_string(),
+            },
+        );
+
+        let latest: SessionExport =
+            serde_json::from_str(&latest_output).expect("parse session-export latest output");
+        assert_eq!(latest.exported_session_id.to_string(), session_id);
+
+        assert_eq!(
+            normalize_session_output(&latest_output, &session_id),
+            readme_output_block("session-export latest", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");

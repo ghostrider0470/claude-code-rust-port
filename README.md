@@ -49,7 +49,7 @@ The first meaningful milestone is:
 - tool and command registries
 - deterministic routing
 - runtime turn processor with structured events
-- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, and session inspection
+- CLI commands for summary, route, bootstrap, resume, tools, commands, session listing, session inspection, transcript inspection, and session export
 
 See:
 
@@ -512,6 +512,80 @@ cargo run -q -p harness-cli -- transcript-show latest
 }
 ```
 
+### `session-export <id>`
+
+Export one persisted session as a single machine-readable JSON bundle that packages the session state and its transcript together. The output uses a deterministic shape: `{ exported_session_id, session, transcript }`, where `session` is the same structure printed by `session-show` and `transcript` is the same structure printed by `transcript-show`. The `exported_session_id` confirms which session was exported and always equals the `session_id` inside both nested records. Turn ordering in `transcript.entries` is preserved in `turn_index` order so the bundle is safe to attach to bug reports or archive outside the repo-local `.sessions/` layout.
+
+```bash
+cargo run -q -p harness-cli -- session-export <session-id>
+```
+
+```json
+{
+  "exported_session_id": "<session-id>",
+  "session": {
+    "session_id": "<session-id>",
+    "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
+    "messages": [
+      "review bash"
+    ],
+    "usage": {
+      "input_tokens": 2,
+      "output_tokens": 2
+    }
+  },
+  "transcript": {
+    "session_id": "<session-id>",
+    "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
+    "entries": [
+      {
+        "turn_index": 0,
+        "prompt": "review bash"
+      }
+    ]
+  }
+}
+```
+
+### `session-export latest`
+
+`latest` resolves to the most recently active persisted session, mirroring how `session-show latest` and `transcript-show latest` resolve their targets.
+
+```bash
+cargo run -q -p harness-cli -- session-export latest
+```
+
+```json
+{
+  "exported_session_id": "<session-id>",
+  "session": {
+    "session_id": "<session-id>",
+    "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
+    "messages": [
+      "review bash"
+    ],
+    "usage": {
+      "input_tokens": 2,
+      "output_tokens": 2
+    }
+  },
+  "transcript": {
+    "session_id": "<session-id>",
+    "created_at_ms": <created-at-ms>,
+    "updated_at_ms": <updated-at-ms>,
+    "entries": [
+      {
+        "turn_index": 0,
+        "prompt": "review bash"
+      }
+    ]
+  }
+}
+```
+
 ## Rust Test Coverage Baseline
 
 Current protected Rust surface:
@@ -531,6 +605,9 @@ Current protected Rust surface:
 - `harness-session` transcript persistence: save/load round-trip preserves `turn_index` ordering, transcript files are excluded from session listings, and `latest_transcript` follows the most recently updated session
 - `harness-runtime` transcript persistence: `bootstrap` writes a transcript file alongside the session, emits a `TranscriptPersisted` event, and `resume` rewrites the transcript so `turn_index` ordering is extended in place
 - README-backed CLI coverage for `transcript-show <id>` and `transcript-show latest` confirming the output restates the owning `session_id` and preserves turn ordering
+- `harness-session` `SessionExport` bundle round-trip: packages session state plus transcript, confirms the exported session id, and preserves `turn_index` ordering in the exported transcript with deterministic serialization
+- `harness-runtime` `export_session` behavior: bundles the persisted session and its transcript for an explicit id, and `latest` resolves to the same bundle
+- README-backed CLI coverage for `session-export <id>` and `session-export latest` confirming the output exposes the `exported_session_id` and preserves turn ordering
 
 Validation commands:
 
@@ -587,3 +664,4 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] move retained architecture-study snapshots under `archive/reference_data/`
 - [x] CLI session resume for persisted sessions (explicit id and `latest`)
 - [x] Persisted transcript files per session and CLI transcript inspection (`transcript-show <id>` and `transcript-show latest`)
+- [x] CLI session export for persisted session bundles (`session-export <id>` and `session-export latest`) in a deterministic JSON shape packaging session state plus transcript
