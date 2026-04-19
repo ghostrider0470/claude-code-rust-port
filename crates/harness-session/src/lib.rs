@@ -359,6 +359,18 @@ pub struct SessionLabelEntry {
     pub pinned: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPinEntry {
+    pub session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub message_count: usize,
+    pub persisted_path: String,
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -828,6 +840,36 @@ impl SessionStore {
                 message_count: listing.message_count,
                 persisted_path: listing.persisted_path,
                 pinned: session.pinned,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Enumerate pinned persisted sessions. Order mirrors `list()` (newest
+    /// first by `updated_at_ms`, then `created_at_ms`, then `session_id`, then
+    /// `persisted_path`). Unpinned sessions are omitted. Surfaces the `label`
+    /// when present so the listing is useful from the terminal without a
+    /// follow-up `session-show`. Never mutates persisted state.
+    pub fn list_pins(&self) -> Result<Vec<SessionPinEntry>, RuntimeError> {
+        let mut entries = Vec::new();
+        for listing in self.list()? {
+            if !listing.pinned {
+                continue;
+            }
+            let id = listing.session_id.to_string();
+            let session = match self.load(&id) {
+                Ok(state) => state,
+                Err(RuntimeError::SessionNotFound(_)) => continue,
+                Err(other) => return Err(other),
+            };
+            entries.push(SessionPinEntry {
+                session_id: listing.session_id,
+                created_at_ms: listing.created_at_ms,
+                updated_at_ms: listing.updated_at_ms,
+                message_count: listing.message_count,
+                persisted_path: listing.persisted_path,
+                pinned: true,
+                label: session.label.clone(),
             });
         }
         Ok(entries)
@@ -2567,6 +2609,134 @@ mod tests {
         assert!(
             entries.is_empty(),
             "unlabeled-only store must yield empty label listing"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn list_pins_orders_newest_first_omits_unpinned_and_surfaces_optional_label() {
+        use super::SessionPinEntry;
+
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        // Three sessions: older pinned + labeled, newer pinned + unlabeled,
+        // and a middle unpinned one that must be omitted from the pin listing.
+        let older_pinned_labeled = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_010,
+            messages: vec![Prompt::new("review bash")],
+            usage: harness_core::UsageSummary::default(),
+            label: Some("runtime-review".to_string()),
+            pinned: true,
+        };
+        let middle_unpinned = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_050,
+            updated_at_ms: 1_700_000_000_100,
+            messages: vec![Prompt::new("unpinned middle")],
+            usage: harness_core::UsageSummary::default(),
+            label: Some("scratch".to_string()),
+            pinned: false,
+        };
+        let newer_pinned_unlabeled = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_090,
+            updated_at_ms: 1_700_000_000_300,
+            messages: vec![Prompt::new("summary please")],
+            usage: harness_core::UsageSummary::default(),
+            label: None,
+            pinned: true,
+        };
+
+        store.save(&older_pinned_labeled).expect("save older pinned");
+        store.save(&middle_unpinned).expect("save middle unpinned");
+        store.save(&newer_pinned_unlabeled).expect("save newer pinned");
+
+        let entries: Vec<SessionPinEntry> = store.list_pins().expect("list pins");
+
+        let ids: Vec<String> = entries
+            .iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                newer_pinned_unlabeled.session_id.to_string(),
+                older_pinned_labeled.session_id.to_string(),
+            ],
+            "list_pins must omit unpinned sessions and use newest-first ordering"
+        );
+
+        assert!(entries[0].pinned);
+        assert_eq!(entries[0].label, None, "unlabeled pinned session must omit label");
+        assert_eq!(entries[0].message_count, 1);
+        assert_eq!(entries[0].updated_at_ms, 1_700_000_000_300);
+        assert_eq!(
+            entries[0].persisted_path,
+            root.join(format!("{}.json", newer_pinned_unlabeled.session_id))
+                .display()
+                .to_string()
+        );
+
+        assert!(entries[1].pinned);
+        assert_eq!(
+            entries[1].label.as_deref(),
+            Some("runtime-review"),
+            "labeled pinned session must surface label"
+        );
+
+        // list_pins must not mutate persisted state — the unpinned session
+        // stays exactly as saved.
+        let reloaded = store
+            .load(&middle_unpinned.session_id.to_string())
+            .expect("reload unpinned");
+        assert!(!reloaded.pinned);
+        assert_eq!(reloaded.label.as_deref(), Some("scratch"));
+
+        // Round-trip the serialized pinned entry to confirm the deterministic
+        // shape and that `label` is skipped for unlabeled pinned rows.
+        let serialized = serde_json::to_string(&entries[0]).expect("serialize pin entry");
+        assert!(
+            !serialized.contains("\"label\""),
+            "unlabeled pinned entry must not serialize `label`: {serialized}"
+        );
+        let round_trip: SessionPinEntry =
+            serde_json::from_str(&serialized).expect("round-trip pin entry");
+        assert_eq!(round_trip, entries[0]);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn list_pins_returns_empty_vector_for_missing_root_and_for_unpinned_store() {
+        // Missing root directory should not error — cleanly empty, matching
+        // the behaviour of `list()` / `list_labels()`.
+        let missing_root = temp_session_root();
+        let empty_store = SessionStore::new(&missing_root);
+        let empty = empty_store.list_pins().expect("list pins on missing root");
+        assert!(empty.is_empty(), "missing root must yield empty pin listing");
+
+        // Store with only unpinned sessions must also yield a clean empty
+        // listing rather than including unpinned sessions.
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+        let unpinned = SessionState {
+            session_id: SessionId::new(),
+            created_at_ms: 1_700_000_000_001,
+            updated_at_ms: 1_700_000_000_010,
+            messages: vec![Prompt::new("no pin")],
+            usage: harness_core::UsageSummary::default(),
+            label: Some("keep".to_string()),
+            pinned: false,
+        };
+        store.save(&unpinned).expect("save unpinned");
+        let entries = store.list_pins().expect("list pins");
+        assert!(
+            entries.is_empty(),
+            "unpinned-only store must yield empty pin listing"
         );
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
