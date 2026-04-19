@@ -3,7 +3,8 @@ use harness_core::{
     CommandName, MatchScore, PermissionDenial, Prompt, RuntimeEvent, SessionId, ToolName, TurnIndex,
 };
 use harness_session::{
-    SessionExport, SessionListing, SessionState, SessionStore, TranscriptRecord, TranscriptStore,
+    SessionComparison, SessionComparisonSide, SessionExport, SessionListing, SessionState,
+    SessionStore, TranscriptRecord, TranscriptStore,
 };
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
@@ -403,6 +404,22 @@ impl RuntimeEngine {
             .map_err(|err| err.to_string())?;
         Ok(SessionExport::new(session, transcript))
     }
+
+    pub fn compare_sessions(&self, left: &str, right: &str) -> Result<SessionComparison, String> {
+        Ok(SessionComparison::new(
+            self.comparison_side_for(left)?,
+            self.comparison_side_for(right)?,
+        ))
+    }
+
+    fn comparison_side_for(&self, id: &str) -> Result<SessionComparisonSide, String> {
+        let session = self.load_session(id)?;
+        let transcript = self
+            .store
+            .load_transcript(&session.session_id.to_string())
+            .map_err(|err| err.to_string())?;
+        Ok(SessionComparisonSide::from_parts(&session, &transcript))
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +671,79 @@ mod tests {
 
         let latest_export = engine.export_session("latest").expect("export latest");
         assert_eq!(latest_export, export, "`latest` must resolve to the same bundle");
+
+        fs::remove_dir_all(&root).expect("remove temp runtime test directory");
+    }
+
+    #[test]
+    fn compare_sessions_reports_signed_deltas_between_persisted_sessions_and_supports_latest() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = RuntimeEngine {
+            commands: CommandRegistry::seeded(),
+            tools: ToolRegistry::seeded(),
+            permissions: PermissionPolicy::with_denied_prefixes(["bash"]),
+            store: SessionStore::new(&root),
+        };
+
+        let first = engine
+            .bootstrap(Prompt::new("review bash"))
+            .expect("bootstrap first session");
+        let first_id = first.session.session_id.to_string();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = engine
+            .bootstrap(Prompt::new("summary"))
+            .expect("bootstrap second session");
+        let second_id = second.session.session_id.to_string();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let resumed_second = engine
+            .resume(&second_id, Prompt::new("follow up"))
+            .expect("resume second session");
+
+        let comparison = engine
+            .compare_sessions(&first_id, &second_id)
+            .expect("compare two persisted sessions");
+
+        assert_eq!(comparison.left_session_id.to_string(), first_id);
+        assert_eq!(comparison.right_session_id.to_string(), second_id);
+        assert_eq!(comparison.left.message_count, 1);
+        assert_eq!(comparison.right.message_count, 2);
+        assert_eq!(comparison.left.transcript_entry_count, 1);
+        assert_eq!(comparison.right.transcript_entry_count, 2);
+        assert!(!comparison.differences.same_session);
+        assert_eq!(comparison.differences.message_count_delta, 1);
+        assert_eq!(comparison.differences.transcript_entry_count_delta, 1);
+        assert!(comparison.differences.updated_at_ms_delta >= 0);
+        assert_eq!(
+            comparison.right.updated_at_ms,
+            resumed_second.session.updated_at_ms
+        );
+
+        let latest_right = engine
+            .compare_sessions(&first_id, "latest")
+            .expect("compare with latest on right side");
+        assert_eq!(latest_right.right_session_id.to_string(), second_id);
+        assert_eq!(latest_right, comparison);
+
+        let latest_left = engine
+            .compare_sessions("latest", &first_id)
+            .expect("compare with latest on left side");
+        assert_eq!(latest_left.left_session_id.to_string(), second_id);
+        assert_eq!(latest_left.right_session_id.to_string(), first_id);
+        assert_eq!(
+            latest_left.differences.message_count_delta,
+            -comparison.differences.message_count_delta
+        );
+
+        let self_compare = engine
+            .compare_sessions(&first_id, &first_id)
+            .expect("compare session with itself");
+        assert!(self_compare.differences.same_session);
+        assert_eq!(self_compare.differences.message_count_delta, 0);
+        assert_eq!(self_compare.differences.updated_at_ms_delta, 0);
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }

@@ -22,6 +22,7 @@ enum CliCommand {
     SessionShow { id: String },
     TranscriptShow { id: String },
     SessionExport { id: String },
+    SessionCompare { left: String, right: String },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -67,6 +68,12 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             let export = engine.export_session(&id).expect("export persisted session");
             serde_json::to_string_pretty(&export).expect("serialize session export")
         }
+        CliCommand::SessionCompare { left, right } => {
+            let comparison = engine
+                .compare_sessions(&left, &right)
+                .expect("compare persisted sessions");
+            serde_json::to_string_pretty(&comparison).expect("serialize session comparison")
+        }
     }
 }
 
@@ -82,7 +89,9 @@ mod tests {
     use super::{render_command, CliCommand};
     use harness_commands::CommandRegistry;
     use harness_runtime::RuntimeEngine;
-    use harness_session::{SessionExport, SessionState, SessionStore, TranscriptRecord};
+    use harness_session::{
+        SessionComparison, SessionExport, SessionState, SessionStore, TranscriptRecord,
+    };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -149,6 +158,51 @@ mod tests {
         }
         normalized.push_str(remaining);
         normalized
+    }
+
+    fn normalize_signed_number_field(output: &str, field: &str, placeholder: &str) -> String {
+        let marker = format!("\"{field}\": ");
+        let mut remaining = output;
+        let mut normalized = String::with_capacity(output.len());
+        while let Some(start) = remaining.find(&marker) {
+            let value_start = start + marker.len();
+            let scan_start = if remaining[value_start..].starts_with('-') {
+                value_start + 1
+            } else {
+                value_start
+            };
+            let value_end = remaining[scan_start..]
+                .find(|ch: char| !ch.is_ascii_digit())
+                .map(|offset| scan_start + offset)
+                .unwrap_or(remaining.len());
+
+            normalized.push_str(&remaining[..value_start]);
+            normalized.push_str(placeholder);
+            remaining = &remaining[value_end..];
+        }
+        normalized.push_str(remaining);
+        normalized
+    }
+
+    fn normalize_comparison_output(
+        output: &str,
+        left_session_id: &str,
+        right_session_id: &str,
+    ) -> String {
+        let replaced = output
+            .replace(left_session_id, "<left-session-id>")
+            .replace(right_session_id, "<right-session-id>");
+        let timestamps = normalize_timestamps(&replaced);
+        let with_created_delta = normalize_signed_number_field(
+            &timestamps,
+            "created_at_ms_delta",
+            "<created-at-ms-delta>",
+        );
+        normalize_signed_number_field(
+            &with_created_delta,
+            "updated_at_ms_delta",
+            "<updated-at-ms-delta>",
+        )
     }
 
     fn normalize_timestamps(output: &str) -> String {
@@ -541,6 +595,115 @@ mod tests {
         assert_eq!(
             normalize_session_output(&latest_output, &session_id),
             readme_output_block("session-export latest", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_compare_matches_readme_example_and_identifies_both_sessions() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let left_bootstrap = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let left_json: serde_json::Value =
+            serde_json::from_str(&left_bootstrap).expect("parse left bootstrap report");
+        let left_id = left_json["session"]["session_id"]
+            .as_str()
+            .expect("left session id")
+            .to_string();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let right_bootstrap = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "summary please".to_string(),
+            },
+        );
+        let right_json: serde_json::Value =
+            serde_json::from_str(&right_bootstrap).expect("parse right bootstrap report");
+        let right_id = right_json["session"]["session_id"]
+            .as_str()
+            .expect("right session id")
+            .to_string();
+
+        let compare_output = render_command(
+            &engine,
+            CliCommand::SessionCompare {
+                left: left_id.clone(),
+                right: right_id.clone(),
+            },
+        );
+
+        let comparison: SessionComparison =
+            serde_json::from_str(&compare_output).expect("parse session-compare output");
+        assert_eq!(
+            comparison.left_session_id.to_string(),
+            left_id,
+            "left_session_id must match the requested left target"
+        );
+        assert_eq!(
+            comparison.right_session_id.to_string(),
+            right_id,
+            "right_session_id must match the requested right target"
+        );
+        assert!(!comparison.differences.same_session);
+        assert_eq!(comparison.differences.message_count_delta, 0);
+        assert_eq!(comparison.differences.transcript_entry_count_delta, 0);
+
+        assert_eq!(
+            normalize_comparison_output(&compare_output, &left_id, &right_id),
+            readme_output_block("session-compare <left-id> <right-id>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_compare_latest_latest_matches_readme_example_and_is_self_comparison() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let compare_output = render_command(
+            &engine,
+            CliCommand::SessionCompare {
+                left: "latest".to_string(),
+                right: "latest".to_string(),
+            },
+        );
+
+        let comparison: SessionComparison =
+            serde_json::from_str(&compare_output).expect("parse session-compare latest output");
+        assert_eq!(comparison.left_session_id.to_string(), session_id);
+        assert_eq!(comparison.right_session_id.to_string(), session_id);
+        assert!(comparison.differences.same_session);
+        assert_eq!(comparison.differences.created_at_ms_delta, 0);
+        assert_eq!(comparison.differences.updated_at_ms_delta, 0);
+        assert_eq!(comparison.differences.message_count_delta, 0);
+        assert_eq!(comparison.differences.transcript_entry_count_delta, 0);
+
+        assert_eq!(
+            normalize_session_output(&compare_output, &session_id),
+            readme_output_block("session-compare latest latest", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");

@@ -66,6 +66,7 @@ Build a Rust-native Claude Code-style CLI/runtime that Hamza can use as a primar
 - [x] `session-show <id>`
 - [x] `transcript-show <id>` (and `transcript-show latest`) — inspect the persisted transcript for an explicit session id or the most recently active session; output is machine-readable JSON that restates the owning `session_id`, the session's recency metadata, and the turn entries in `turn_index` order
 - [x] `session-export <id>` (and `session-export latest`) — export a persisted session bundle as deterministic JSON packaging session state plus transcript together; output confirms the `exported_session_id` and preserves `turn_index` ordering so bundles can be archived, attached to bug reports, or compared across environments without manually inspecting `.sessions/` files
+- [x] `session-compare <left-id> <right-id>` (with `latest` accepted on either side) — compare two persisted sessions as a single machine-readable JSON bundle that identifies both compared `session_id`s and reports signed `right - left` deltas for recency metadata (`created_at_ms_delta`, `updated_at_ms_delta`) and activity metadata (`message_count_delta`, `transcript_entry_count_delta`), plus a `same_session` flag so self-comparisons via `latest latest` are trivially recognizable
 
 ## Phase 8 - Cleanup
 
