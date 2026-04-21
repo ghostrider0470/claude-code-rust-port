@@ -135,6 +135,9 @@ enum CliCommand {
     TranscriptTurnIndexRange {
         selector: String,
     },
+    TranscriptHasTurnGaps {
+        selector: String,
+    },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -342,6 +345,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             serde_json::to_string_pretty(&turn_range)
                 .expect("serialize transcript turn-index-range")
         }
+        CliCommand::TranscriptHasTurnGaps { selector } => {
+            let has_turn_gaps = engine
+                .has_turn_gaps_session_transcript(&selector)
+                .expect("has-turn-gaps persisted session transcript");
+            serde_json::to_string_pretty(&has_turn_gaps)
+                .expect("serialize transcript has-turn-gaps")
+        }
     }
 }
 
@@ -362,10 +372,11 @@ mod tests {
         SessionImport, SessionLabelEntry, SessionPin, SessionPinEntry, SessionPrune, SessionRename,
         SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionTranscriptContext,
         SessionTranscriptEntryCount, SessionTranscriptFind, SessionTranscriptFirstTurn,
-        SessionTranscriptHasEntries, SessionTranscriptLastTurn, SessionTranscriptRange,
-        SessionTranscriptTail, SessionTranscriptTurnExists, SessionTranscriptTurnIndexes,
-        SessionTranscriptTurnRange, SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin,
-        TranscriptRecord, DEFAULT_TRANSCRIPT_CONTEXT_WINDOW, DEFAULT_TRANSCRIPT_RANGE_COUNT,
+        SessionTranscriptHasEntries, SessionTranscriptHasTurnGaps, SessionTranscriptLastTurn,
+        SessionTranscriptRange, SessionTranscriptTail, SessionTranscriptTurnExists,
+        SessionTranscriptTurnIndexes, SessionTranscriptTurnRange, SessionTranscriptTurnShow,
+        SessionUnlabel, SessionUnpin, TranscriptEntry, TranscriptRecord,
+        DEFAULT_TRANSCRIPT_CONTEXT_WINDOW, DEFAULT_TRANSCRIPT_RANGE_COUNT,
         DEFAULT_TRANSCRIPT_TAIL_COUNT,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
@@ -6290,6 +6301,283 @@ mod tests {
 
         let err = engine
             .turn_range_session_transcript("label:")
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_has_turn_gaps_raw_id_contiguous_transcript_reports_false_and_leaves_state_untouched(
+    ) {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let before_session = engine.load_session(&id).expect("reload session");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptHasTurnGaps {
+                selector: id.clone(),
+            },
+        );
+        let has_turn_gaps: SessionTranscriptHasTurnGaps =
+            serde_json::from_str(&output).expect("parse transcript-has-turn-gaps output");
+
+        assert_eq!(has_turn_gaps.selector, id);
+        assert_eq!(
+            has_turn_gaps.resolved_session_id.to_string(),
+            has_turn_gaps.selector
+        );
+        assert_eq!(has_turn_gaps.total_entries, 3);
+        assert!(!has_turn_gaps.has_turn_gaps);
+        assert_eq!(has_turn_gaps.created_at_ms, before_transcript.created_at_ms);
+        assert_eq!(has_turn_gaps.updated_at_ms, before_transcript.updated_at_ms);
+
+        let after_transcript = engine
+            .load_transcript(&has_turn_gaps.selector)
+            .expect("reload after has-turn-gaps");
+        assert_eq!(after_transcript, before_transcript);
+        let after_session = engine
+            .load_session(&has_turn_gaps.selector)
+            .expect("reload session after has-turn-gaps");
+        assert_eq!(after_session, before_session);
+
+        let normalized =
+            normalize_timestamps(&output.replace(&has_turn_gaps.selector, "<session-id>"));
+        assert_eq!(
+            normalized,
+            readme_output_block("transcript-has-turn-gaps <selector>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_has_turn_gaps_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer first");
+        extend_transcript(&engine, &newer, &["newer follow-up"]);
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptHasTurnGaps {
+                selector: "latest".to_string(),
+            },
+        );
+        let has_turn_gaps: SessionTranscriptHasTurnGaps =
+            serde_json::from_str(&output).expect("parse transcript-has-turn-gaps latest output");
+
+        assert_eq!(has_turn_gaps.selector, "latest");
+        assert_eq!(has_turn_gaps.resolved_session_id.to_string(), newer);
+        assert_eq!(has_turn_gaps.total_entries, 2);
+        assert!(!has_turn_gaps.has_turn_gaps);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_has_turn_gaps_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled first");
+        extend_transcript(&engine, &id, &["labeled follow-up"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for has-turn-gaps");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptHasTurnGaps {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let has_turn_gaps: SessionTranscriptHasTurnGaps =
+            serde_json::from_str(&output).expect("parse transcript-has-turn-gaps label output");
+
+        assert_eq!(has_turn_gaps.selector, "label:runtime-review");
+        assert_eq!(has_turn_gaps.resolved_session_id.to_string(), id);
+        assert_eq!(has_turn_gaps.total_entries, 2);
+        assert!(!has_turn_gaps.has_turn_gaps);
+
+        let reloaded = engine
+            .load_session(&id)
+            .expect("reload after has-turn-gaps");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_has_turn_gaps_transcript_with_internal_gap_reports_true() {
+        use harness_core::{Prompt, TurnIndex};
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist seed session");
+
+        let gap_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: vec![
+                TranscriptEntry {
+                    turn_index: TurnIndex(0),
+                    prompt: Prompt::new("turn zero"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(2),
+                    prompt: Prompt::new("turn two — gap at 1"),
+                },
+            ],
+        };
+        engine
+            .store
+            .save_transcript(&gap_transcript)
+            .expect("persist gap transcript");
+
+        let has_turn_gaps = engine
+            .has_turn_gaps_session_transcript(&session_id)
+            .expect("gap transcript should succeed");
+
+        assert_eq!(has_turn_gaps.selector, session_id);
+        assert_eq!(
+            has_turn_gaps.resolved_session_id.to_string(),
+            session_id
+        );
+        assert_eq!(has_turn_gaps.total_entries, 2);
+        assert!(has_turn_gaps.has_turn_gaps);
+        assert_eq!(has_turn_gaps.created_at_ms, gap_transcript.created_at_ms);
+        assert_eq!(has_turn_gaps.updated_at_ms, gap_transcript.updated_at_ms);
+
+        let after = engine
+            .load_transcript(&session_id)
+            .expect("reload gap transcript");
+        assert_eq!(after, gap_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_has_turn_gaps_empty_transcript_returns_false_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        let has_turn_gaps = engine
+            .has_turn_gaps_session_transcript(&session_id)
+            .expect("empty transcript should succeed");
+        assert_eq!(has_turn_gaps.selector, session_id);
+        assert_eq!(
+            has_turn_gaps.resolved_session_id.to_string(),
+            has_turn_gaps.selector
+        );
+        assert_eq!(has_turn_gaps.total_entries, 0);
+        assert!(!has_turn_gaps.has_turn_gaps);
+        assert_eq!(has_turn_gaps.created_at_ms, empty_transcript.created_at_ms);
+        assert_eq!(has_turn_gaps.updated_at_ms, empty_transcript.updated_at_ms);
+
+        let after = engine
+            .load_transcript(&has_turn_gaps.selector)
+            .expect("reload empty transcript");
+        assert_eq!(after, empty_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_has_turn_gaps_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .has_turn_gaps_session_transcript("00000000-0000-0000-0000-000000000000")
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .has_turn_gaps_session_transcript("label:nonexistent")
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        assert!(engine.load_session(&anchor).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_has_turn_gaps_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
+
+        let err = engine
+            .has_turn_gaps_session_transcript("label:duplicate")
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_has_turn_gaps_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .has_turn_gaps_session_transcript("label:")
             .expect_err("empty label should fail");
         assert!(
             err.contains("malformed session selector"),
