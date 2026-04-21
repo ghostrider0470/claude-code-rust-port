@@ -1241,10 +1241,11 @@ cargo run -q -p harness-cli -- session-find review
 ]
 ```
 
-Pass `--limit <n>` to cap the result set to at most the newest `n` matching persisted sessions in the existing newest-first ordering. The per-row JSON shape is preserved — `--limit` only truncates the array, it does not wrap the output. Match filtering is preserved too — sessions with no matching transcript entries stay omitted, and each retained row's `matches` array is unchanged under limiting. `--limit 0` returns an empty array cleanly, a `--limit` larger than the matched subset returns every matching session, and omitting `--limit` preserves the unlimited listing above exactly.
+Pass `--limit <n>` to cap the result set to at most the newest `n` matching persisted sessions in the existing newest-first ordering. Pass `--tail <n>` instead to return only the last `n` rows from that same ordered result set — because `session-find` is newest-first, `--tail` surfaces the oldest `n` matching sessions while preserving the ordering. The per-row JSON shape is preserved — both flags only slice the array, they do not wrap the output. Match filtering is preserved too — sessions with no matching transcript entries stay omitted, and each retained row's `matches` array is unchanged. `--limit 0` / `--tail 0` return an empty array cleanly, a `--limit` / `--tail` larger than the matched subset returns every matching session, and omitting both flags preserves the unlimited listing above exactly. `--limit` and `--tail` are mutually exclusive at parse time so output-shaping semantics stay deterministic. Negative and non-numeric `--limit` / `--tail` values fail cleanly at parse time.
 
 ```bash
 cargo run -q -p harness-cli -- session-find review --limit 1
+cargo run -q -p harness-cli -- session-find review --tail 1
 ```
 
 ### `session-find <unmatched-query>`
