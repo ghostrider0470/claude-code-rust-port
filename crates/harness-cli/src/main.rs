@@ -150,6 +150,9 @@ enum CliCommand {
     TranscriptLargestGap {
         selector: String,
     },
+    TranscriptGapCount {
+        selector: String,
+    },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -392,6 +395,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             serde_json::to_string_pretty(&largest_gap)
                 .expect("serialize transcript largest-gap")
         }
+        CliCommand::TranscriptGapCount { selector } => {
+            let gap_count = engine
+                .gap_count_session_transcript(&selector)
+                .expect("gap-count persisted session transcript");
+            serde_json::to_string_pretty(&gap_count)
+                .expect("serialize transcript gap-count")
+        }
     }
 }
 
@@ -412,8 +422,9 @@ mod tests {
         SessionImport, SessionLabelEntry, SessionPin, SessionPinEntry, SessionPrune, SessionRename,
         SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionTranscriptContext,
         SessionTranscriptEntryCount, SessionTranscriptFind, SessionTranscriptFirstTurn,
-        SessionTranscriptGapRange, SessionTranscriptGapRanges, SessionTranscriptHasEntries,
-        SessionTranscriptHasTurnGaps, SessionTranscriptLargestGap, SessionTranscriptLargestGapRun,
+        SessionTranscriptGapCount, SessionTranscriptGapRange, SessionTranscriptGapRanges,
+        SessionTranscriptHasEntries, SessionTranscriptHasTurnGaps, SessionTranscriptLargestGap,
+        SessionTranscriptLargestGapRun,
         SessionTranscriptLastTurn, SessionTranscriptMissingTurnIndexes, SessionTranscriptRange,
         SessionTranscriptTail, SessionTranscriptTurnDensity, SessionTranscriptTurnExists,
         SessionTranscriptTurnIndexes, SessionTranscriptTurnRange, SessionTranscriptTurnShow,
@@ -8076,6 +8087,338 @@ mod tests {
 
         let err = engine
             .largest_gap_session_transcript("label:")
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_count_raw_id_contiguous_transcript_reports_zero_and_leaves_state_untouched() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let before_session = engine.load_session(&id).expect("reload session");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptGapCount {
+                selector: id.clone(),
+            },
+        );
+        let gap_count: SessionTranscriptGapCount =
+            serde_json::from_str(&output).expect("parse transcript-gap-count output");
+
+        assert_eq!(gap_count.selector, id);
+        assert_eq!(gap_count.resolved_session_id.to_string(), gap_count.selector);
+        assert_eq!(gap_count.total_entries, 3);
+        assert_eq!(gap_count.gap_count, 0);
+        assert_eq!(gap_count.created_at_ms, before_transcript.created_at_ms);
+        assert_eq!(gap_count.updated_at_ms, before_transcript.updated_at_ms);
+
+        let after_transcript = engine
+            .load_transcript(&gap_count.selector)
+            .expect("reload after gap-count");
+        assert_eq!(after_transcript, before_transcript);
+        let after_session = engine
+            .load_session(&gap_count.selector)
+            .expect("reload session after gap-count");
+        assert_eq!(after_session, before_session);
+
+        let normalized = normalize_timestamps(&output.replace(&gap_count.selector, "<session-id>"));
+        assert_eq!(
+            normalized,
+            readme_output_block("transcript-gap-count <selector>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_count_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer first");
+        extend_transcript(&engine, &newer, &["newer follow-up"]);
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptGapCount {
+                selector: "latest".to_string(),
+            },
+        );
+        let gap_count: SessionTranscriptGapCount =
+            serde_json::from_str(&output).expect("parse transcript-gap-count latest output");
+
+        assert_eq!(gap_count.selector, "latest");
+        assert_eq!(gap_count.resolved_session_id.to_string(), newer);
+        assert_eq!(gap_count.total_entries, 2);
+        assert_eq!(gap_count.gap_count, 0);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_count_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled first");
+        extend_transcript(&engine, &id, &["labeled follow-up"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for gap-count");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptGapCount {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let gap_count: SessionTranscriptGapCount =
+            serde_json::from_str(&output).expect("parse transcript-gap-count label output");
+
+        assert_eq!(gap_count.selector, "label:runtime-review");
+        assert_eq!(gap_count.resolved_session_id.to_string(), id);
+        assert_eq!(gap_count.total_entries, 2);
+        assert_eq!(gap_count.gap_count, 0);
+
+        let reloaded = engine.load_session(&id).expect("reload after gap-count");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_count_single_entry_transcript_reports_zero() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "only prompt");
+
+        let gap_count = engine
+            .gap_count_session_transcript(&id)
+            .expect("single-entry transcript should succeed");
+        assert_eq!(gap_count.total_entries, 1);
+        assert_eq!(gap_count.gap_count, 0);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_count_empty_transcript_reports_zero_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        let gap_count = engine
+            .gap_count_session_transcript(&session_id)
+            .expect("empty transcript should succeed");
+        assert_eq!(gap_count.selector, session_id);
+        assert_eq!(gap_count.resolved_session_id.to_string(), gap_count.selector);
+        assert_eq!(gap_count.total_entries, 0);
+        assert_eq!(gap_count.gap_count, 0);
+        assert_eq!(gap_count.created_at_ms, empty_transcript.created_at_ms);
+        assert_eq!(gap_count.updated_at_ms, empty_transcript.updated_at_ms);
+
+        let after = engine
+            .load_transcript(&gap_count.selector)
+            .expect("reload empty transcript");
+        assert_eq!(after, empty_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_count_single_gap_run_reports_one() {
+        use harness_core::{Prompt, TurnIndex};
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist seed session");
+
+        let single_gap_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: vec![
+                TranscriptEntry {
+                    turn_index: TurnIndex(1),
+                    prompt: Prompt::new("turn one"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(5),
+                    prompt: Prompt::new("turn five - adjacent missing 2,3,4 collapse to one run"),
+                },
+            ],
+        };
+        engine
+            .store
+            .save_transcript(&single_gap_transcript)
+            .expect("persist single-gap transcript");
+
+        let gap_count = engine
+            .gap_count_session_transcript(&session_id)
+            .expect("single-gap transcript should succeed");
+
+        assert_eq!(gap_count.total_entries, 2);
+        assert_eq!(gap_count.gap_count, 1);
+
+        let after = engine
+            .load_transcript(&session_id)
+            .expect("reload single-gap transcript");
+        assert_eq!(after, single_gap_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_count_multiple_disjoint_gap_runs_reports_count() {
+        use harness_core::{Prompt, TurnIndex};
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist seed session");
+
+        let transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: vec![
+                TranscriptEntry {
+                    turn_index: TurnIndex(1),
+                    prompt: Prompt::new("turn one"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(4),
+                    prompt: Prompt::new("turn four - gap at 2,3 (run 1)"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(5),
+                    prompt: Prompt::new("turn five"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(7),
+                    prompt: Prompt::new("turn seven - gap at 6 (run 2)"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(11),
+                    prompt: Prompt::new("turn eleven - gap at 8,9,10 (run 3)"),
+                },
+            ],
+        };
+        engine
+            .store
+            .save_transcript(&transcript)
+            .expect("persist multi-gap transcript");
+
+        let gap_count = engine
+            .gap_count_session_transcript(&session_id)
+            .expect("multi-gap transcript should succeed");
+
+        assert_eq!(gap_count.total_entries, 5);
+        assert_eq!(gap_count.gap_count, 3);
+        assert_eq!(gap_count.created_at_ms, transcript.created_at_ms);
+        assert_eq!(gap_count.updated_at_ms, transcript.updated_at_ms);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_count_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .gap_count_session_transcript("00000000-0000-0000-0000-000000000000")
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .gap_count_session_transcript("label:nonexistent")
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        assert!(engine.load_session(&anchor).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_count_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
+
+        let err = engine
+            .gap_count_session_transcript("label:duplicate")
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_count_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .gap_count_session_transcript("label:")
             .expect_err("empty label should fail");
         assert!(
             err.contains("malformed session selector"),

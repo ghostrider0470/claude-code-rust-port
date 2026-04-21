@@ -914,6 +914,27 @@ cargo run -q -p harness-cli -- transcript-largest-gap label:runtime-review
 }
 ```
 
+### `transcript-gap-count <selector>`
+
+Inspect only the number of contiguous runs of missing integer `turn_index` values inside the persisted turn span of a single persisted session transcript, without returning the runs themselves or any transcript entry payloads. Useful as the inspect-only continuity gap-run-count probe for scripts that already know the transcript has gaps (via `transcript-has-turn-gaps`) and want a single scalar describing how fragmented the missing turns are — for dashboards, triage heuristics, or health checks — without the per-range detail returned by `transcript-gap-ranges` or the single worst-run detail returned by `transcript-largest-gap`. Accepts the same selector forms every other single-session command accepts — a raw `session_id`, `latest`, or `label:<name>` — routed through the shared selector-resolution path so behavior is identical to `session-show`, `transcript-show`, `transcript-tail`, `transcript-find`, `transcript-range`, `transcript-turn-show`, `transcript-context`, `transcript-last-turn`, `transcript-first-turn`, `transcript-entry-count`, `transcript-has-entries`, `transcript-turn-exists`, `transcript-turn-indexes`, `transcript-turn-index-range`, `transcript-has-turn-gaps`, `transcript-missing-turn-indexes`, `transcript-turn-density`, `transcript-gap-ranges`, `transcript-largest-gap`, etc. The inspection is scoped to the resolved session's persisted transcript only. Output uses a deterministic shape: `{ selector, resolved_session_id, created_at_ms, updated_at_ms, total_entries, gap_count }`, where `selector` echoes the raw input, `resolved_session_id` is the persisted id the selector actually maps to, `total_entries` equals the persisted transcript length, and `gap_count` is the number of contiguous missing-`turn_index` runs between the smallest and largest present `turn_index` values. Adjacent missing turns collapse into one run; disjoint runs count separately. Empty transcripts, single-entry transcripts, and contiguous transcripts succeed cleanly with `gap_count: 0`. Selector failure semantics are unchanged: unknown ids and unknown labels surface as `session not found`, duplicate labels surface as `ambiguous label`, and `label:` with no name surfaces as `malformed selector`. No persisted session state, transcript entry, label, pinned flag, id, path, or ordering metadata is mutated.
+
+```bash
+cargo run -q -p harness-cli -- transcript-gap-count <session-id>
+cargo run -q -p harness-cli -- transcript-gap-count latest
+cargo run -q -p harness-cli -- transcript-gap-count label:runtime-review
+```
+
+```json
+{
+  "selector": "<session-id>",
+  "resolved_session_id": "<session-id>",
+  "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
+  "total_entries": 3,
+  "gap_count": 0
+}
+```
+
 ### `session-export <id>`
 
 Export one persisted session as a single machine-readable JSON bundle that packages the session state and its transcript together. The output uses a deterministic shape: `{ exported_session_id, session, transcript }`, where `session` is the same structure printed by `session-show` and `transcript` is the same structure printed by `transcript-show`. The `exported_session_id` confirms which session was exported and always equals the `session_id` inside both nested records. Turn ordering in `transcript.entries` is preserved in `turn_index` order so the bundle is safe to attach to bug reports or archive outside the repo-local `.sessions/` layout.
