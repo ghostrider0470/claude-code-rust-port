@@ -503,6 +503,17 @@ pub struct SessionTranscriptHasEntries {
     pub has_entries: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptTurnExists {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub turn_index: usize,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub exists: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -526,10 +537,7 @@ impl SessionStore {
         Ok(path)
     }
 
-    pub fn save_transcript(
-        &self,
-        record: &TranscriptRecord,
-    ) -> Result<PathBuf, RuntimeError> {
+    pub fn save_transcript(&self, record: &TranscriptRecord) -> Result<PathBuf, RuntimeError> {
         fs::create_dir_all(&self.root).map_err(|err| RuntimeError::Io(err.to_string()))?;
         let path = self.transcript_path(&record.session_id.to_string());
         let body = serde_json::to_string_pretty(record)
@@ -888,6 +896,37 @@ impl SessionStore {
         })
     }
 
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// deterministic machine-readable summary describing whether the resolved
+    /// persisted transcript contains an entry whose `turn_index == turn`,
+    /// without returning transcript entries. The persisted transcript is not
+    /// mutated. Empty transcripts and `turn` values past the end of the
+    /// transcript succeed cleanly with `exists: false` and the real
+    /// `total_entries`. Preserves existing selector failure semantics unchanged
+    /// (`SessionNotFound` / `AmbiguousLabel` / `MalformedSelector`).
+    pub fn turn_exists_transcript(
+        &self,
+        selector: &str,
+        turn: usize,
+    ) -> Result<SessionTranscriptTurnExists, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total_entries = transcript.entries.len();
+        let exists = transcript
+            .entries
+            .iter()
+            .any(|entry| entry.turn_index == TurnIndex(turn));
+        Ok(SessionTranscriptTurnExists {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            turn_index: turn,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries,
+            exists,
+        })
+    }
+
     /// Resolve a label to a single persisted `session_id`. Errors map cleanly:
     /// no match → `SessionNotFound("label:<name>")`, more than one match →
     /// `AmbiguousLabel`. Sessions without a label (older or never-renamed) are
@@ -1066,10 +1105,7 @@ impl SessionStore {
         })
     }
 
-    pub fn import_bundle(
-        &self,
-        bundle: &SessionExport,
-    ) -> Result<SessionImport, RuntimeError> {
+    pub fn import_bundle(&self, bundle: &SessionExport) -> Result<SessionImport, RuntimeError> {
         if bundle.exported_session_id != bundle.session.session_id {
             return Err(RuntimeError::InvalidBundle(format!(
                 "exported_session_id {} does not match nested session.session_id {}",
@@ -1129,7 +1165,9 @@ impl SessionStore {
             created_at_ms: now,
             updated_at_ms: now,
             messages: forked_messages,
-            usage: source_session.usage.add_turn(prompt.as_str(), "turn forked"),
+            usage: source_session
+                .usage
+                .add_turn(prompt.as_str(), "turn forked"),
             label: None,
             pinned: false,
         };
@@ -1159,11 +1197,7 @@ impl SessionStore {
         })
     }
 
-    pub fn rename(
-        &self,
-        session_id: &str,
-        label: &str,
-    ) -> Result<SessionRename, RuntimeError> {
+    pub fn rename(&self, session_id: &str, label: &str) -> Result<SessionRename, RuntimeError> {
         let applied_label = normalize_label(label)?;
 
         let mut session = self.load(session_id)?;
@@ -1182,9 +1216,10 @@ impl SessionStore {
     /// distinguish this from "unknown id" without silently no-oping.
     pub fn unlabel(&self, session_id: &str) -> Result<SessionUnlabel, RuntimeError> {
         let mut session = self.load(session_id)?;
-        let removed_label = session.label.take().ok_or_else(|| {
-            RuntimeError::SessionAlreadyUnlabeled(session.session_id.to_string())
-        })?;
+        let removed_label = session
+            .label
+            .take()
+            .ok_or_else(|| RuntimeError::SessionAlreadyUnlabeled(session.session_id.to_string()))?;
         self.save(&session)?;
 
         Ok(SessionUnlabel {
@@ -1351,7 +1386,8 @@ impl SessionStore {
                 continue;
             }
 
-            let body = fs::read_to_string(&path).map_err(|err| RuntimeError::Io(err.to_string()))?;
+            let body =
+                fs::read_to_string(&path).map_err(|err| RuntimeError::Io(err.to_string()))?;
             let session: SessionState = serde_json::from_str(&body)
                 .map_err(|err| RuntimeError::Serialization(err.to_string()))?;
 
@@ -1370,7 +1406,11 @@ impl SessionStore {
                 .updated_at_ms
                 .cmp(&left.updated_at_ms)
                 .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
-                .then_with(|| left.session_id.to_string().cmp(&right.session_id.to_string()))
+                .then_with(|| {
+                    left.session_id
+                        .to_string()
+                        .cmp(&right.session_id.to_string())
+                })
                 .then_with(|| left.persisted_path.cmp(&right.persisted_path))
         });
 
@@ -1380,11 +1420,11 @@ impl SessionStore {
 
 #[cfg(test)]
 mod tests {
+    use super::normalize_label;
     use super::{
         SessionComparison, SessionComparisonSide, SessionExport, SessionFindResult, SessionState,
         SessionStore, TranscriptEntry, TranscriptRecord, TranscriptStore,
     };
-    use super::normalize_label;
     use harness_core::{Prompt, RuntimeError, SessionId, TurnIndex};
     use std::collections::BTreeMap;
     use std::fs;
@@ -1420,7 +1460,10 @@ mod tests {
             .load(&session.session_id.to_string())
             .expect("load session state");
 
-        assert_eq!(saved_path, root.join(format!("{}.json", session.session_id)));
+        assert_eq!(
+            saved_path,
+            root.join(format!("{}.json", session.session_id))
+        );
         assert_eq!(loaded, session);
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
@@ -1716,7 +1759,10 @@ mod tests {
         );
 
         let again = serde_json::to_string(&export).expect("serialize export again");
-        assert_eq!(serialized, again, "export serialization should be deterministic");
+        assert_eq!(
+            serialized, again,
+            "export serialization should be deterministic"
+        );
 
         let roundtrip: SessionExport =
             serde_json::from_str(&serialized).expect("deserialize export");
@@ -1793,7 +1839,10 @@ mod tests {
 
         let serialized = serde_json::to_string(&comparison).expect("serialize comparison");
         let again = serde_json::to_string(&comparison).expect("serialize comparison again");
-        assert_eq!(serialized, again, "comparison serialization should be deterministic");
+        assert_eq!(
+            serialized, again,
+            "comparison serialization should be deterministic"
+        );
         let roundtrip: SessionComparison =
             serde_json::from_str(&serialized).expect("deserialize comparison");
         assert_eq!(roundtrip, comparison);
@@ -2135,9 +2184,13 @@ mod tests {
         let unrelated_record = TranscriptRecord::from_session(&unrelated, &unrelated_transcript);
 
         store.save(&older).expect("save older");
-        store.save_transcript(&older_record).expect("save older transcript");
+        store
+            .save_transcript(&older_record)
+            .expect("save older transcript");
         store.save(&newer).expect("save newer");
-        store.save_transcript(&newer_record).expect("save newer transcript");
+        store
+            .save_transcript(&newer_record)
+            .expect("save newer transcript");
         store.save(&unrelated).expect("save unrelated");
         store
             .save_transcript(&unrelated_record)
@@ -2307,7 +2360,10 @@ mod tests {
         let reloaded_source = store
             .load(&source.session_id.to_string())
             .expect("source session must survive");
-        assert_eq!(reloaded_source, source, "source session must not be mutated");
+        assert_eq!(
+            reloaded_source, source,
+            "source session must not be mutated"
+        );
         let reloaded_source_transcript = store
             .load_transcript(&source.session_id.to_string())
             .expect("source transcript must survive");
@@ -2331,7 +2387,10 @@ mod tests {
         }
 
         assert!(
-            !root.exists() || fs::read_dir(&root).map(|mut iter| iter.next().is_none()).unwrap_or(true),
+            !root.exists()
+                || fs::read_dir(&root)
+                    .map(|mut iter| iter.next().is_none())
+                    .unwrap_or(true),
             "no persisted artifacts should be written when fork source is missing"
         );
 
@@ -2373,7 +2432,9 @@ mod tests {
         let mut resumed_first = first.clone();
         resumed_first.updated_at_ms = 1_700_000_000_500;
         resumed_first.messages.push(Prompt::new("follow up"));
-        store.save(&resumed_first).expect("save resumed first session");
+        store
+            .save(&resumed_first)
+            .expect("save resumed first session");
 
         let latest = store.latest().expect("load latest persisted session");
         assert_eq!(latest, resumed_first);
@@ -2480,7 +2541,9 @@ mod tests {
             }
         }
 
-        let reloaded = store.load(&id).expect("reload session after rejected rename");
+        let reloaded = store
+            .load(&id)
+            .expect("reload session after rejected rename");
         assert!(
             reloaded.label.is_none(),
             "rejected rename must not persist a label on the session"
@@ -2667,7 +2730,8 @@ mod tests {
     }
 
     #[test]
-    fn retag_rejects_same_effective_label_and_unlabeled_and_invalid_inputs_without_touching_store() {
+    fn retag_rejects_same_effective_label_and_unlabeled_and_invalid_inputs_without_touching_store()
+    {
         let root = temp_session_root();
         let store = SessionStore::new(&root);
 
@@ -2738,7 +2802,9 @@ mod tests {
         }
 
         // All failing attempts must leave persisted state untouched.
-        let reloaded_labeled = store.load(&labeled_id).expect("reload labeled after failures");
+        let reloaded_labeled = store
+            .load(&labeled_id)
+            .expect("reload labeled after failures");
         assert_eq!(reloaded_labeled.label.as_deref(), Some("runtime-review"));
         assert_eq!(reloaded_labeled.updated_at_ms, labeled.updated_at_ms);
         let reloaded_unlabeled = store
@@ -2888,8 +2954,14 @@ mod tests {
         // silent newest-wins.
         match store.resolve_selector("label:dup") {
             Err(RuntimeError::AmbiguousLabel(message)) => {
-                assert!(message.contains("\"dup\""), "message should quote label: {message}");
-                assert!(message.contains('2'), "message should mention match count: {message}");
+                assert!(
+                    message.contains("\"dup\""),
+                    "message should quote label: {message}"
+                );
+                assert!(
+                    message.contains('2'),
+                    "message should mention match count: {message}"
+                );
             }
             other => panic!("expected AmbiguousLabel, got {other:?}"),
         }
@@ -3027,8 +3099,14 @@ mod tests {
         assert_eq!(entries.len(), 2, "duplicate labels must not be collapsed");
         assert_eq!(entries[0].label, "dup");
         assert_eq!(entries[1].label, "dup");
-        assert_eq!(entries[0].session_id.to_string(), later.session_id.to_string());
-        assert_eq!(entries[1].session_id.to_string(), earlier.session_id.to_string());
+        assert_eq!(
+            entries[0].session_id.to_string(),
+            later.session_id.to_string()
+        );
+        assert_eq!(
+            entries[1].session_id.to_string(),
+            earlier.session_id.to_string()
+        );
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
     }
@@ -3039,8 +3117,13 @@ mod tests {
         // same as for `list()`: cleanly empty.
         let missing_root = temp_session_root();
         let empty_store = SessionStore::new(&missing_root);
-        let empty = empty_store.list_labels().expect("list labels on missing root");
-        assert!(empty.is_empty(), "missing root must yield empty label listing");
+        let empty = empty_store
+            .list_labels()
+            .expect("list labels on missing root");
+        assert!(
+            empty.is_empty(),
+            "missing root must yield empty label listing"
+        );
 
         // Store with only unlabeled sessions must also yield a clean empty
         // listing rather than including the unlabeled sessions.
@@ -3102,9 +3185,13 @@ mod tests {
             pinned: true,
         };
 
-        store.save(&older_pinned_labeled).expect("save older pinned");
+        store
+            .save(&older_pinned_labeled)
+            .expect("save older pinned");
         store.save(&middle_unpinned).expect("save middle unpinned");
-        store.save(&newer_pinned_unlabeled).expect("save newer pinned");
+        store
+            .save(&newer_pinned_unlabeled)
+            .expect("save newer pinned");
 
         let entries: Vec<SessionPinEntry> = store.list_pins().expect("list pins");
 
@@ -3122,7 +3209,10 @@ mod tests {
         );
 
         assert!(entries[0].pinned);
-        assert_eq!(entries[0].label, None, "unlabeled pinned session must omit label");
+        assert_eq!(
+            entries[0].label, None,
+            "unlabeled pinned session must omit label"
+        );
         assert_eq!(entries[0].message_count, 1);
         assert_eq!(entries[0].updated_at_ms, 1_700_000_000_300);
         assert_eq!(
@@ -3168,7 +3258,10 @@ mod tests {
         let missing_root = temp_session_root();
         let empty_store = SessionStore::new(&missing_root);
         let empty = empty_store.list_pins().expect("list pins on missing root");
-        assert!(empty.is_empty(), "missing root must yield empty pin listing");
+        assert!(
+            empty.is_empty(),
+            "missing root must yield empty pin listing"
+        );
 
         // Store with only unpinned sessions must also yield a clean empty
         // listing rather than including unpinned sessions.
@@ -3196,7 +3289,10 @@ mod tests {
     #[test]
     fn normalize_label_trims_and_rejects_empty_whitespace() {
         assert_eq!(normalize_label("hello").unwrap(), "hello");
-        assert_eq!(normalize_label("  runtime-review  ").unwrap(), "runtime-review");
+        assert_eq!(
+            normalize_label("  runtime-review  ").unwrap(),
+            "runtime-review"
+        );
         assert!(matches!(
             normalize_label(""),
             Err(RuntimeError::InvalidLabel(_))
@@ -3306,10 +3402,7 @@ mod tests {
             .collect();
         assert_eq!(
             remaining,
-            vec![
-                newest.session_id.to_string(),
-                middle.session_id.to_string(),
-            ]
+            vec![newest.session_id.to_string(), middle.session_id.to_string(),]
         );
 
         fs::remove_dir_all(&root).expect("remove temp session test directory");
@@ -3503,7 +3596,10 @@ mod tests {
         .expect("serialize legacy session");
         let reloaded: SessionState =
             serde_json::from_str(&legacy).expect("deserialize legacy session");
-        assert!(!reloaded.pinned, "missing pinned field must default to false");
+        assert!(
+            !reloaded.pinned,
+            "missing pinned field must default to false"
+        );
     }
 
     #[test]
@@ -3540,7 +3636,13 @@ mod tests {
             .load(&a.session_id.to_string())
             .expect("pinned session must survive prune");
         assert!(reloaded_pinned.pinned);
-        assert_eq!(reloaded_pinned, SessionState { pinned: true, ..a.clone() });
+        assert_eq!(
+            reloaded_pinned,
+            SessionState {
+                pinned: true,
+                ..a.clone()
+            }
+        );
         assert!(root
             .join(format!("{}.transcript.json", a.session_id))
             .exists());
@@ -3557,12 +3659,8 @@ mod tests {
 
         let a = seed_session(&store, 1_700_000_000_000, None);
         let b = seed_session(&store, 1_700_000_000_100, None);
-        store
-            .pin(&a.session_id.to_string())
-            .expect("pin session a");
-        store
-            .pin(&b.session_id.to_string())
-            .expect("pin session b");
+        store.pin(&a.session_id.to_string()).expect("pin session a");
+        store.pin(&b.session_id.to_string()).expect("pin session b");
 
         // Every session is pinned, so prune with any budget is a clean no-op on
         // removed, but both pins surface via pinned_preserved.
@@ -3694,7 +3792,10 @@ mod tests {
         // Duplicate labels surface AmbiguousLabel rather than silently picking.
         match store.check_selector("label:dup") {
             Err(RuntimeError::AmbiguousLabel(message)) => {
-                assert!(message.contains("\"dup\""), "message should quote label: {message}");
+                assert!(
+                    message.contains("\"dup\""),
+                    "message should quote label: {message}"
+                );
             }
             other => panic!("expected AmbiguousLabel, got {other:?}"),
         }
