@@ -8,10 +8,11 @@ use harness_session::{
     SessionPrune, SessionRename, SessionRetag, SessionSelectorCheck, SessionState, SessionStore,
     SessionTranscriptContext, SessionTranscriptEntryCount, SessionTranscriptFind,
     SessionTranscriptFirstTurn, SessionTranscriptGapRanges, SessionTranscriptHasEntries,
-    SessionTranscriptHasTurnGaps, SessionTranscriptLastTurn, SessionTranscriptMissingTurnIndexes,
-    SessionTranscriptRange, SessionTranscriptTail, SessionTranscriptTurnDensity,
-    SessionTranscriptTurnExists, SessionTranscriptTurnIndexes, SessionTranscriptTurnRange,
-    SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin, TranscriptRecord, TranscriptStore,
+    SessionTranscriptHasTurnGaps, SessionTranscriptLargestGap, SessionTranscriptLastTurn,
+    SessionTranscriptMissingTurnIndexes, SessionTranscriptRange, SessionTranscriptTail,
+    SessionTranscriptTurnDensity, SessionTranscriptTurnExists, SessionTranscriptTurnIndexes,
+    SessionTranscriptTurnRange, SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin,
+    TranscriptRecord, TranscriptStore,
 };
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
@@ -654,6 +655,15 @@ impl RuntimeEngine {
     ) -> Result<SessionTranscriptGapRanges, String> {
         self.store
             .gap_ranges_transcript(selector)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn largest_gap_session_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptLargestGap, String> {
+        self.store
+            .largest_gap_transcript(selector)
             .map_err(|err| err.to_string())
     }
 
