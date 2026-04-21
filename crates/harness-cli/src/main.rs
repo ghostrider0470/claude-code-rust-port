@@ -38,6 +38,8 @@ enum CliCommand {
     },
     SessionShow {
         selector: String,
+        #[arg(long)]
+        limit: Option<usize>,
     },
     TranscriptShow {
         selector: String,
@@ -223,10 +225,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             }
             serde_json::to_string_pretty(&sessions).expect("serialize session list")
         }
-        CliCommand::SessionShow { selector } => {
-            let session = engine
+        CliCommand::SessionShow { selector, limit } => {
+            let mut session = engine
                 .load_session(&selector)
                 .expect("load session by selector");
+            if let Some(limit) = limit {
+                session.messages.truncate(limit);
+            }
             serde_json::to_string_pretty(&session).expect("serialize session")
         }
         CliCommand::TranscriptShow { selector, limit } => {
@@ -1049,6 +1054,7 @@ mod tests {
             &engine,
             CliCommand::SessionShow {
                 selector: session_id.clone(),
+                limit: None,
             },
         );
         let session: SessionState =
@@ -1111,6 +1117,7 @@ mod tests {
             &engine,
             CliCommand::SessionShow {
                 selector: session_id.clone(),
+                limit: None,
             },
         );
         let reloaded: SessionState =
@@ -2348,6 +2355,7 @@ mod tests {
             &engine,
             CliCommand::SessionShow {
                 selector: session_id.clone(),
+                limit: None,
             },
         );
         assert!(
@@ -2367,6 +2375,7 @@ mod tests {
             &engine,
             CliCommand::SessionShow {
                 selector: session_id.clone(),
+                limit: None,
             },
         );
         assert!(
@@ -2408,6 +2417,7 @@ mod tests {
             &engine,
             CliCommand::SessionShow {
                 selector: session_id.clone(),
+                limit: None,
             },
         );
         let raw_state: SessionState =
@@ -2420,6 +2430,7 @@ mod tests {
             &engine,
             CliCommand::SessionShow {
                 selector: "label:runtime-review".to_string(),
+                limit: None,
             },
         );
         let labeled_state: SessionState =
@@ -3941,6 +3952,7 @@ mod tests {
             &engine,
             CliCommand::SessionShow {
                 selector: "latest".to_string(),
+                limit: None,
             },
         );
 
@@ -12106,6 +12118,319 @@ mod tests {
             rendered.contains("--limit") || rendered.contains("not-a-number"),
             "expected parse error to mention the invalid --limit value, got: {rendered}"
         );
+    }
+
+    fn session_show_state(
+        engine: &RuntimeEngine,
+        selector: &str,
+        limit: Option<usize>,
+    ) -> SessionState {
+        let output = render_command(
+            engine,
+            CliCommand::SessionShow {
+                selector: selector.to_string(),
+                limit,
+            },
+        );
+        serde_json::from_str(&output).expect("parse session-show output")
+    }
+
+    #[test]
+    fn session_show_omitted_limit_preserves_unlimited_behavior_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
+
+        let baseline = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                selector: id.clone(),
+                limit: None,
+            },
+        );
+        let explicit_large = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                selector: id.clone(),
+                limit: Some(usize::MAX),
+            },
+        );
+        assert_eq!(
+            baseline, explicit_large,
+            "omitted --limit must match an oversized --limit exactly"
+        );
+
+        let parsed: SessionState =
+            serde_json::from_str(&baseline).expect("parse session-show baseline");
+        let messages: Vec<String> = parsed
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "first prompt".to_string(),
+                "second prompt".to_string(),
+                "third prompt".to_string(),
+                "fourth prompt".to_string(),
+            ],
+            "omitted --limit must return every message in canonical append order"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_with_limit_zero_returns_empty_messages_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+        let before_session = engine.load_session(&id).expect("reload session");
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let state = session_show_state(&engine, &id, Some(0));
+        assert_eq!(state.session_id.to_string(), id);
+        assert!(
+            state.messages.is_empty(),
+            "--limit 0 must return an empty messages array"
+        );
+
+        let after_session = engine.load_session(&id).expect("reload after show");
+        let after_transcript = engine.load_transcript(&id).expect("reload transcript after show");
+        assert_eq!(
+            after_session, before_session,
+            "--limit 0 must not mutate the persisted session state"
+        );
+        assert_eq!(
+            after_transcript, before_transcript,
+            "--limit 0 must not mutate the persisted transcript"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_raw_id_with_limit_truncates_in_append_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
+
+        let state = session_show_state(&engine, &id, Some(2));
+        assert_eq!(state.session_id.to_string(), id);
+        let messages: Vec<String> = state
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "first prompt".to_string(),
+                "second prompt".to_string(),
+            ],
+            "--limit <n> must truncate to the first n messages in canonical append order"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_latest_selector_honors_limit_and_resolves_to_newest_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older session");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer first");
+        extend_transcript(&engine, &newer, &["newer second", "newer third"]);
+
+        let state = session_show_state(&engine, "latest", Some(1));
+        assert_eq!(
+            state.session_id.to_string(),
+            newer,
+            "latest must resolve to the most recent persisted session"
+        );
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].0, "newer first");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_label_selector_honors_limit_and_surfaces_resolved_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled first");
+        extend_transcript(&engine, &id, &["labeled second", "labeled third"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for session-show");
+
+        let output = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                selector: "label:runtime-review".to_string(),
+                limit: Some(2),
+            },
+        );
+        let state: SessionState =
+            serde_json::from_str(&output).expect("parse labeled session-show");
+        assert_eq!(state.session_id.to_string(), id);
+        assert!(
+            !output.contains("label:runtime-review"),
+            "JSON must surface the resolved id rather than the typed selector: {output}"
+        );
+        let messages: Vec<String> = state
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            messages,
+            vec!["labeled first".to_string(), "labeled second".to_string()]
+        );
+        assert_eq!(state.label.as_deref(), Some("runtime-review"));
+
+        let reloaded = engine.load_session(&id).expect("reload after session-show");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+        assert_eq!(
+            reloaded.messages.len(),
+            3,
+            "persisted messages must not be mutated by --limit"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_limit_larger_than_total_returns_all_messages() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let state = session_show_state(&engine, &id, Some(99));
+        assert_eq!(state.session_id.to_string(), id);
+        let messages: Vec<String> = state
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "first prompt".to_string(),
+                "second prompt".to_string(),
+                "third prompt".to_string(),
+            ],
+            "oversized --limit must return every persisted message cleanly"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_invalid_limit_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "session-show",
+            "some-id",
+            "--limit",
+            "-1",
+        ])
+        .expect_err("negative --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "session-show",
+            "some-id",
+            "--limit",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn session_show_selector_failures_unchanged_with_and_without_limit() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _id = bootstrap_session_id(&engine, "first prompt");
+
+        // Unknown id → SessionNotFound (identical with and without --limit).
+        let err = engine
+            .load_session("does-not-exist")
+            .expect_err("unknown id must fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        // Unknown label → SessionNotFound.
+        let err = engine
+            .load_session("label:missing")
+            .expect_err("unknown label must fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        // Empty `label:` → MalformedSelector.
+        let err = engine
+            .load_session("label:")
+            .expect_err("empty label must fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed selector for empty label, got: {err}"
+        );
+
+        // Duplicate labels → AmbiguousLabel.
+        let first = bootstrap_session_id(&engine, "dup one");
+        let second = bootstrap_session_id(&engine, "dup two");
+        engine
+            .rename_session(&first, "dup")
+            .expect("label first duplicate");
+        engine
+            .rename_session(&second, "dup")
+            .expect("label second duplicate");
+        let err = engine
+            .load_session("label:dup")
+            .expect_err("ambiguous label must fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
 
     #[test]
