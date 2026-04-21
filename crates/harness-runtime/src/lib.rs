@@ -11,6 +11,7 @@ use harness_session::{
     SessionTranscriptHasEntries, SessionTranscriptHasTurnGaps, SessionTranscriptLargestGap,
     SessionTranscriptSmallestGap,
     SessionTranscriptLastTurn,
+    SessionTranscriptMissingTurnCount,
     SessionTranscriptMissingTurnIndexes, SessionTranscriptRange, SessionTranscriptTail,
     SessionTranscriptTurnDensity, SessionTranscriptTurnExists, SessionTranscriptTurnIndexes,
     SessionTranscriptTurnRange, SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin,
@@ -684,6 +685,15 @@ impl RuntimeEngine {
     ) -> Result<SessionTranscriptGapCount, String> {
         self.store
             .gap_count_transcript(selector)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn missing_turn_count_session_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptMissingTurnCount, String> {
+        self.store
+            .missing_turn_count_transcript(selector)
             .map_err(|err| err.to_string())
     }
 
