@@ -8,9 +8,9 @@ use harness_session::{
     SessionPrune, SessionRename, SessionRetag, SessionSelectorCheck, SessionState, SessionStore,
     SessionTranscriptContext, SessionTranscriptEntryCount, SessionTranscriptFind,
     SessionTranscriptFirstTurn, SessionTranscriptHasEntries, SessionTranscriptHasTurnGaps,
-    SessionTranscriptLastTurn, SessionTranscriptRange, SessionTranscriptTail,
-    SessionTranscriptTurnExists, SessionTranscriptTurnIndexes, SessionTranscriptTurnRange,
-    SessionTranscriptTurnShow,
+    SessionTranscriptLastTurn, SessionTranscriptMissingTurnIndexes, SessionTranscriptRange,
+    SessionTranscriptTail, SessionTranscriptTurnExists, SessionTranscriptTurnIndexes,
+    SessionTranscriptTurnRange, SessionTranscriptTurnShow,
     SessionUnlabel, SessionUnpin, TranscriptRecord, TranscriptStore,
 };
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
@@ -627,6 +627,15 @@ impl RuntimeEngine {
     ) -> Result<SessionTranscriptHasTurnGaps, String> {
         self.store
             .has_turn_gaps_transcript(selector)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn missing_turn_indexes_session_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptMissingTurnIndexes, String> {
+        self.store
+            .missing_turn_indexes_transcript(selector)
             .map_err(|err| err.to_string())
     }
 
