@@ -1207,6 +1207,12 @@ cargo run -q -p harness-cli -- session-find review
 ]
 ```
 
+Pass `--limit <n>` to cap the result set to at most the newest `n` matching persisted sessions in the existing newest-first ordering. The per-row JSON shape is preserved — `--limit` only truncates the array, it does not wrap the output. Match filtering is preserved too — sessions with no matching transcript entries stay omitted, and each retained row's `matches` array is unchanged under limiting. `--limit 0` returns an empty array cleanly, a `--limit` larger than the matched subset returns every matching session, and omitting `--limit` preserves the unlimited listing above exactly.
+
+```bash
+cargo run -q -p harness-cli -- session-find review --limit 1
+```
+
 ### `session-find <unmatched-query>`
 
 An empty query, or a query that matches no persisted transcript entries, returns an empty JSON array instead of erroring. The example below uses a query that no persisted transcript contains, so the output is the deterministic empty result `[]`.
@@ -1630,6 +1636,7 @@ Current protected Rust surface:
 - `harness-session` `SessionStore::find` behavior: matches persisted transcript prompt text case-insensitively, orders results using the existing newest-first session ordering, preserves `turn_index` ordering inside each result's `matches` array, and returns an empty result set for both an empty query and a query with no matches without mutating any persisted session state
 - `harness-runtime` `find_sessions` behavior: surfaces matches across bootstrap and resume-appended turns for an explicit query, scopes to sessions whose transcripts contain the query, and treats both unmatched queries and the empty query as a clean empty result set
 - README-backed CLI coverage for `session-find <query>` confirming a positive search reports the matched session id with `turn_index`-ordered `matches`, and that a query with no matches produces a deterministic empty JSON array
+- focused CLI coverage for `session-find <query> --limit <n>` confirming that omitting `--limit` preserves the unlimited behavior exactly, that an empty query and a no-match query both remain a clean empty array with and without `--limit`, that `--limit 0` returns an empty array cleanly, that `--limit 1` returns only the newest matching session, that a limit smaller than the match count returns the newest-first prefix of the default ordering while non-matching sessions stay omitted, that a limit larger than the match count returns every matching session unchanged, that each retained row's `matches` array is unchanged under limiting, that limiting does not mutate any persisted session or transcript, and that negative or non-numeric `--limit` values fail cleanly at parse time
 - `harness-session` `SessionStore::fork` behavior: creates a fresh `session_id` rather than mutating the source, copies source messages and transcript entries forward in turn-index order, appends the new prompt as the first divergent turn, persists both the forked session JSON and its sibling transcript JSON, leaves the source session JSON and transcript exactly as they were, and reports `SessionNotFound` cleanly when the source id does not exist
 - `harness-runtime` `fork_session` behavior: resolves the `latest` selector to the most recently active persisted session, delegates to the store to write the forked session plus transcript, and fails cleanly for a missing source id without leaving partial persisted artifacts behind
 - README-backed CLI coverage for `session-fork <source-session-id> "try again"` and `session-fork latest "try again"` confirming the output identifies both the source and forked session ids, exposes the `appended_turn_index`, and reports the written session and transcript paths while the source session and transcript remain unchanged
