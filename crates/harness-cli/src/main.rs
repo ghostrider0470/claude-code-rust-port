@@ -34,10 +34,10 @@ enum CliCommand {
         limit: Option<usize>,
     },
     SessionShow {
-        id: String,
+        selector: String,
     },
     TranscriptShow {
-        id: String,
+        selector: String,
     },
     SessionExport {
         id: String,
@@ -212,12 +212,16 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             }
             serde_json::to_string_pretty(&sessions).expect("serialize session list")
         }
-        CliCommand::SessionShow { id } => {
-            let session = engine.load_session(&id).expect("load session by id");
+        CliCommand::SessionShow { selector } => {
+            let session = engine
+                .load_session(&selector)
+                .expect("load session by selector");
             serde_json::to_string_pretty(&session).expect("serialize session")
         }
-        CliCommand::TranscriptShow { id } => {
-            let transcript = engine.load_transcript(&id).expect("load transcript by id");
+        CliCommand::TranscriptShow { selector } => {
+            let transcript = engine
+                .load_transcript(&selector)
+                .expect("load transcript by selector");
             serde_json::to_string_pretty(&transcript).expect("serialize transcript")
         }
         CliCommand::SessionExport { id } => {
@@ -918,7 +922,7 @@ mod tests {
         let session_output = render_command(
             &engine,
             CliCommand::SessionShow {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
         let session: SessionState =
@@ -927,7 +931,7 @@ mod tests {
         assert_eq!(session.session_id.to_string(), session_id);
         assert_eq!(
             normalize_session_output(&session_output, &session_id),
-            readme_output_block("session-show <id>", "json")
+            readme_output_block("session-show <selector>", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
@@ -980,7 +984,7 @@ mod tests {
         let reloaded_output = render_command(
             &engine,
             CliCommand::SessionShow {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
         let reloaded: SessionState =
@@ -1020,7 +1024,7 @@ mod tests {
         let transcript_output = render_command(
             &engine,
             CliCommand::TranscriptShow {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
 
@@ -1044,7 +1048,7 @@ mod tests {
 
         assert_eq!(
             normalize_session_output(&transcript_output, &session_id),
-            readme_output_block("transcript-show <id>", "json")
+            readme_output_block("transcript-show <selector>", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
@@ -1071,7 +1075,7 @@ mod tests {
         let latest_output = render_command(
             &engine,
             CliCommand::TranscriptShow {
-                id: "latest".to_string(),
+                selector: "latest".to_string(),
             },
         );
 
@@ -2215,7 +2219,7 @@ mod tests {
         let unlabeled_show = render_command(
             &engine,
             CliCommand::SessionShow {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
         assert!(
@@ -2234,7 +2238,7 @@ mod tests {
         let labeled_show = render_command(
             &engine,
             CliCommand::SessionShow {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
         assert!(
@@ -2275,7 +2279,7 @@ mod tests {
         let by_raw_id = render_command(
             &engine,
             CliCommand::SessionShow {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
         let raw_state: SessionState =
@@ -2287,7 +2291,7 @@ mod tests {
         let by_label = render_command(
             &engine,
             CliCommand::SessionShow {
-                id: "label:runtime-review".to_string(),
+                selector: "label:runtime-review".to_string(),
             },
         );
         let labeled_state: SessionState =
@@ -3808,7 +3812,7 @@ mod tests {
         let latest_output = render_command(
             &engine,
             CliCommand::SessionShow {
-                id: "latest".to_string(),
+                selector: "latest".to_string(),
             },
         );
 
@@ -11606,6 +11610,129 @@ mod tests {
         assert!(
             err.contains("malformed session selector"),
             "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_show_label_selector_targets_persisted_session_and_emits_resolved_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let bootstrap_output = render_command(
+            &engine,
+            CliCommand::Bootstrap {
+                prompt: "review bash".to_string(),
+            },
+        );
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_str(&bootstrap_output).expect("parse bootstrap report");
+        let session_id = bootstrap_json["session"]["session_id"]
+            .as_str()
+            .expect("session id in bootstrap output")
+            .to_string();
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                id: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        // Raw-id targeting must keep working unchanged after the rename.
+        let by_raw_id = render_command(
+            &engine,
+            CliCommand::TranscriptShow {
+                selector: session_id.clone(),
+            },
+        );
+        let raw: TranscriptRecord =
+            serde_json::from_str(&by_raw_id).expect("parse raw-id transcript-show");
+        assert_eq!(raw.session_id.to_string(), session_id);
+
+        // `latest` resolves to the same persisted transcript.
+        let by_latest = render_command(
+            &engine,
+            CliCommand::TranscriptShow {
+                selector: "latest".to_string(),
+            },
+        );
+        let latest: TranscriptRecord =
+            serde_json::from_str(&by_latest).expect("parse latest transcript-show");
+        assert_eq!(latest.session_id.to_string(), session_id);
+
+        // `label:<name>` resolves to the same persisted transcript and the
+        // emitted JSON surfaces the actual resolved session_id rather than
+        // the label string.
+        let by_label = render_command(
+            &engine,
+            CliCommand::TranscriptShow {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let labeled: TranscriptRecord =
+            serde_json::from_str(&by_label).expect("parse label transcript-show");
+        assert_eq!(labeled.session_id.to_string(), session_id);
+        assert!(
+            !by_label.contains("label:runtime-review"),
+            "JSON output must not echo the selector string in place of the resolved id: {by_label}"
+        );
+        assert!(
+            by_label.contains(&session_id),
+            "JSON output must surface the resolved session_id: {by_label}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_show_label_selector_failures_are_distinct_and_clean() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Unknown label surfaces as session-not-found and echoes the typed
+        // selector so scripts can correlate the failure with the request.
+        let unknown = engine.load_transcript("label:missing");
+        assert!(unknown.is_err(), "unknown label must fail cleanly");
+        let unknown_err = unknown.unwrap_err();
+        assert!(
+            unknown_err.contains("label:missing"),
+            "unknown-label error must echo the typed selector, got: {unknown_err}"
+        );
+
+        // Two persisted sessions sharing a label is ambiguous.
+        let one = engine
+            .bootstrap(Prompt::new("alpha"))
+            .expect("bootstrap one");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let two = engine
+            .bootstrap(Prompt::new("beta"))
+            .expect("bootstrap two");
+        engine
+            .rename_session(&one.session.session_id.to_string(), "dup")
+            .expect("label one");
+        engine
+            .rename_session(&two.session.session_id.to_string(), "dup")
+            .expect("label two");
+        let ambiguous = engine.load_transcript("label:dup");
+        assert!(ambiguous.is_err(), "ambiguous label must fail cleanly");
+        assert!(
+            ambiguous.unwrap_err().contains("ambiguous session label"),
+            "ambiguous-label error must mention ambiguity"
+        );
+
+        // `label:` with no name is malformed.
+        let malformed = engine.load_transcript("label:");
+        assert!(malformed.is_err(), "malformed selector must fail cleanly");
+        assert!(
+            malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
+            "malformed-selector error must mention malformed selector"
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
