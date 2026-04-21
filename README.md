@@ -1360,6 +1360,12 @@ cargo run -q -p harness-cli -- session-labels
 ]
 ```
 
+Pass `--limit <n>` to cap the listing to at most the newest `n` labeled persisted sessions in the existing newest-first ordering. The per-row JSON shape is preserved — `--limit` only truncates the array, it does not wrap the output. Labeled-session filtering is preserved too — unlabeled sessions stay omitted and duplicate labels remain visible as separate rows under limiting. `--limit 0` returns an empty array cleanly, a `--limit` larger than the labeled subset returns every labeled session, and omitting `--limit` preserves the unlimited listing above exactly.
+
+```bash
+cargo run -q -p harness-cli -- session-labels --limit 1
+```
+
 ### `session-labels <empty-store>`
 
 If no persisted session carries a label, `session-labels` returns an empty JSON array instead of erroring, so scripts can treat "no labels" and "none yet" identically.
