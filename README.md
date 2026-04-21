@@ -1410,10 +1410,11 @@ cargo run -q -p harness-cli -- session-labels
 ]
 ```
 
-Pass `--limit <n>` to cap the listing to at most the newest `n` labeled persisted sessions in the existing newest-first ordering. The per-row JSON shape is preserved — `--limit` only truncates the array, it does not wrap the output. Labeled-session filtering is preserved too — unlabeled sessions stay omitted and duplicate labels remain visible as separate rows under limiting. `--limit 0` returns an empty array cleanly, a `--limit` larger than the labeled subset returns every labeled session, and omitting `--limit` preserves the unlimited listing above exactly.
+Pass `--limit <n>` to cap the listing to at most the newest `n` labeled persisted sessions in the existing newest-first ordering. Or pass `--tail <n>` to retain only the last `n` rows from that same ordered labeled subset — because the listing is already newest-first, `--tail` surfaces the oldest retained labeled sessions while preserving their existing ordering. The per-row JSON shape is preserved in both cases — these flags only slice the array, they do not wrap the output. Labeled-session filtering is preserved too — unlabeled sessions stay omitted and duplicate labels remain visible as separate rows under limiting or tailing. `--limit 0` / `--tail 0` return an empty array cleanly, oversized bounds return every labeled session cleanly, omitting both flags preserves the unlimited listing above exactly, and `--limit` conflicts with `--tail` at clap parse time so the bounded-output semantics stay deterministic.
 
 ```bash
 cargo run -q -p harness-cli -- session-labels --limit 1
+cargo run -q -p harness-cli -- session-labels --tail 1
 ```
 
 ### `session-labels <empty-store>`
