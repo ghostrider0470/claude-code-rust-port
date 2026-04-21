@@ -74,7 +74,10 @@ enum CliCommand {
         #[arg(long)]
         limit: Option<usize>,
     },
-    SessionPins,
+    SessionPins {
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     SessionPrune {
         #[arg(long)]
         keep: usize,
@@ -270,10 +273,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             }
             serde_json::to_string_pretty(&labels).expect("serialize session labels")
         }
-        CliCommand::SessionPins => {
-            let pins = engine
+        CliCommand::SessionPins { limit } => {
+            let mut pins = engine
                 .list_session_pins()
                 .expect("list persisted session pins");
+            if let Some(limit) = limit {
+                pins.truncate(limit);
+            }
             serde_json::to_string_pretty(&pins).expect("serialize session pins")
         }
         CliCommand::SessionPrune { keep } => {
@@ -2515,7 +2521,7 @@ mod tests {
             },
         );
 
-        let pins_output = render_command(&engine, CliCommand::SessionPins);
+        let pins_output = render_command(&engine, CliCommand::SessionPins { limit: None });
         let entries: Vec<SessionPinEntry> =
             serde_json::from_str(&pins_output).expect("parse session-pins output");
         assert_eq!(entries.len(), 2, "only pinned sessions must appear");
@@ -2572,7 +2578,7 @@ mod tests {
                 id: session_id.clone(),
             },
         );
-        let pins_output = render_command(&readme_engine, CliCommand::SessionPins);
+        let pins_output = render_command(&readme_engine, CliCommand::SessionPins { limit: None });
 
         assert_eq!(
             normalize_bootstrap_example(&pins_output, &session_id, &readme_root),
@@ -2588,7 +2594,7 @@ mod tests {
         let engine = temp_engine(&root);
 
         // Truly empty store: no persisted sessions at all.
-        let output = render_command(&engine, CliCommand::SessionPins);
+        let output = render_command(&engine, CliCommand::SessionPins { limit: None });
         assert_eq!(
             output,
             readme_output_block("session-pins <empty-store>", "json"),
@@ -2602,7 +2608,7 @@ mod tests {
                 prompt: "no pin".to_string(),
             },
         );
-        let output = render_command(&engine, CliCommand::SessionPins);
+        let output = render_command(&engine, CliCommand::SessionPins { limit: None });
         assert_eq!(
             output,
             readme_output_block("session-pins <empty-store>", "json"),
@@ -2610,6 +2616,240 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    fn pinned_session_ids(engine: &RuntimeEngine, limit: Option<usize>) -> Vec<String> {
+        let output = render_command(engine, CliCommand::SessionPins { limit });
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("parse session-pins output");
+        parsed
+            .as_array()
+            .expect("session-pins output is a JSON array")
+            .iter()
+            .map(|entry| {
+                entry["session_id"]
+                    .as_str()
+                    .expect("session_id in session-pins output")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn pin_session(engine: &RuntimeEngine, id: &str) {
+        let _ = render_command(
+            engine,
+            CliCommand::SessionPin {
+                id: id.to_string(),
+            },
+        );
+    }
+
+    #[test]
+    fn session_pins_omitted_limit_preserves_current_unlimited_behavior_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let older_id = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer_id = bootstrap_session_id(&engine, "newer");
+        pin_session(&engine, &older_id);
+        pin_session(&engine, &newer_id);
+
+        let baseline = render_command(&engine, CliCommand::SessionPins { limit: None });
+        let explicit_large = render_command(
+            &engine,
+            CliCommand::SessionPins {
+                limit: Some(usize::MAX),
+            },
+        );
+        assert_eq!(baseline, explicit_large);
+
+        // Per-row JSON shape is the bare array — no wrapper object.
+        assert!(baseline.trim_start().starts_with('['));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pins_with_limit_zero_returns_empty_array_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "only one");
+        pin_session(&engine, &id);
+
+        let output = render_command(&engine, CliCommand::SessionPins { limit: Some(0) });
+        assert_eq!(output, "[]");
+
+        // The store itself is untouched — default listing still returns the pin.
+        assert_eq!(pinned_session_ids(&engine, None), vec![id]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pins_with_limit_one_returns_only_newest_preserving_ordering() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let older_id = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer_id = bootstrap_session_id(&engine, "newer");
+        pin_session(&engine, &older_id);
+        pin_session(&engine, &newer_id);
+
+        let limited = pinned_session_ids(&engine, Some(1));
+        assert_eq!(limited, vec![newer_id.clone()]);
+
+        let unlimited = pinned_session_ids(&engine, None);
+        assert_eq!(unlimited, vec![newer_id, older_id]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pins_with_limit_smaller_than_pinned_subset_returns_prefix_of_default_ordering() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Three pinned sessions plus one unpinned middle to prove the
+        // limit slices the pinned listing, not the raw sessions listing.
+        let a = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let unpinned = bootstrap_session_id(&engine, "unpinned middle");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "second");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let c = bootstrap_session_id(&engine, "third");
+
+        pin_session(&engine, &a);
+        pin_session(&engine, &b);
+        pin_session(&engine, &c);
+
+        let unlimited = pinned_session_ids(&engine, None);
+        assert_eq!(unlimited, vec![c.clone(), b.clone(), a.clone()]);
+        assert!(
+            !unlimited.iter().any(|id| id == &unpinned),
+            "unpinned session must stay omitted in default listing"
+        );
+
+        let limited = pinned_session_ids(&engine, Some(2));
+        assert_eq!(limited, unlimited[..2].to_vec());
+        assert!(
+            !limited.iter().any(|id| id == &unpinned),
+            "unpinned session must stay omitted under limiting"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pins_with_limit_exceeding_pinned_subset_returns_all_pinned_sessions() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _unpinned = bootstrap_session_id(&engine, "unpinned middle");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "second");
+        pin_session(&engine, &a);
+        pin_session(&engine, &b);
+
+        let unlimited = pinned_session_ids(&engine, None);
+        assert_eq!(unlimited, vec![b.clone(), a.clone()]);
+
+        let limited = pinned_session_ids(&engine, Some(99));
+        assert_eq!(limited, unlimited);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pins_with_limit_keeps_labeled_pinned_rows_label_field_visible() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let older_id = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer_id = bootstrap_session_id(&engine, "newer");
+        label_session(&engine, &older_id, "runtime-review");
+        pin_session(&engine, &older_id);
+        pin_session(&engine, &newer_id);
+
+        // A limit large enough to include the labeled older row still
+        // surfaces the optional `label` field for it, and the unlabeled
+        // newer pinned row continues to omit `label`.
+        let output = render_command(&engine, CliCommand::SessionPins { limit: Some(2) });
+        let entries: Vec<SessionPinEntry> =
+            serde_json::from_str(&output).expect("parse limited session-pins");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].session_id.to_string(), newer_id);
+        assert_eq!(entries[0].label, None);
+        assert!(entries[0].pinned);
+        assert_eq!(entries[1].session_id.to_string(), older_id);
+        assert_eq!(entries[1].label.as_deref(), Some("runtime-review"));
+        assert!(entries[1].pinned);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pins_limit_does_not_mutate_persisted_store() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "second");
+        pin_session(&engine, &a);
+        pin_session(&engine, &b);
+
+        let before_a = engine.load_session(&a).expect("load a before");
+        let before_b = engine.load_session(&b).expect("load b before");
+        let before_ta = engine.load_transcript(&a).expect("transcript a before");
+        let before_tb = engine.load_transcript(&b).expect("transcript b before");
+        let before_pins = render_command(&engine, CliCommand::SessionPins { limit: None });
+
+        let _ = render_command(&engine, CliCommand::SessionPins { limit: Some(0) });
+        let _ = render_command(&engine, CliCommand::SessionPins { limit: Some(1) });
+        let _ = render_command(&engine, CliCommand::SessionPins { limit: Some(99) });
+
+        assert_eq!(engine.load_session(&a).expect("load a after"), before_a);
+        assert_eq!(engine.load_session(&b).expect("load b after"), before_b);
+        assert_eq!(
+            engine.load_transcript(&a).expect("transcript a after"),
+            before_ta
+        );
+        assert_eq!(
+            engine.load_transcript(&b).expect("transcript b after"),
+            before_tb
+        );
+        let after_pins = render_command(&engine, CliCommand::SessionPins { limit: None });
+        assert_eq!(after_pins, before_pins);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pins_invalid_limit_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from(["harness", "session-pins", "--limit", "-1"])
+            .expect_err("negative --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from(["harness", "session-pins", "--limit", "not-a-number"])
+            .expect_err("non-numeric --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
     }
 
     #[test]
