@@ -585,6 +585,16 @@ pub struct SessionTranscriptGapRanges {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptGapCount {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub gap_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTranscriptLargestGapRun {
     pub start_turn_index: usize,
     pub end_turn_index: usize,
@@ -1263,6 +1273,55 @@ impl SessionStore {
             updated_at_ms: transcript.updated_at_ms,
             total_entries,
             gap_ranges,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// deterministic machine-readable count of contiguous runs of missing
+    /// integer `turn_index` values between the smallest and largest present
+    /// `turn_index` values in the resolved persisted transcript, without
+    /// returning the full gap runs themselves or transcript entries. Adjacent
+    /// missing turns collapse into one run; disjoint runs count separately.
+    /// Empty transcripts, single-entry transcripts, and contiguous transcripts
+    /// succeed cleanly with `gap_count: 0`. The persisted transcript is not
+    /// mutated. Preserves existing selector failure semantics unchanged
+    /// (`SessionNotFound` / `AmbiguousLabel` / `MalformedSelector`).
+    pub fn gap_count_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptGapCount, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total_entries = transcript.entries.len();
+        let present: std::collections::HashSet<usize> = transcript
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .collect();
+        let mut gap_count = 0usize;
+        if let (Some(&min), Some(&max)) = (present.iter().min(), present.iter().max()) {
+            let mut in_gap = false;
+            for idx in min..=max {
+                if present.contains(&idx) {
+                    if in_gap {
+                        gap_count += 1;
+                        in_gap = false;
+                    }
+                } else {
+                    in_gap = true;
+                }
+            }
+            if in_gap {
+                gap_count += 1;
+            }
+        }
+        Ok(SessionTranscriptGapCount {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries,
+            gap_count,
         })
     }
 
