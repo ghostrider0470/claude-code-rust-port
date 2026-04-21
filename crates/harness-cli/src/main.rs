@@ -120,6 +120,8 @@ enum CliCommand {
         query: String,
         #[arg(long)]
         limit: Option<usize>,
+        #[arg(long, conflicts_with = "limit")]
+        tail: Option<usize>,
     },
     TranscriptRange {
         selector: String,
@@ -375,12 +377,18 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             selector,
             query,
             limit,
+            tail,
         } => {
             let mut find = engine
                 .find_in_session_transcript(&selector, &query)
                 .expect("search persisted session transcript");
             if let Some(limit) = limit {
                 find.matches.truncate(limit);
+                find.match_count = find.matches.len();
+            } else if let Some(tail) = tail {
+                let total = find.matches.len();
+                let skip = total.saturating_sub(tail);
+                find.matches.drain(..skip);
                 find.match_count = find.matches.len();
             }
             serde_json::to_string_pretty(&find).expect("serialize transcript find")
@@ -4806,6 +4814,7 @@ mod tests {
                 selector: id.clone(),
                 query: "REVIEW".to_string(),
                 limit: None,
+                tail: None,
             },
         );
         let find: SessionTranscriptFind =
@@ -4843,6 +4852,7 @@ mod tests {
                 selector: "latest".to_string(),
                 query: "review".to_string(),
                 limit: None,
+                tail: None,
             },
         );
         let find: SessionTranscriptFind =
@@ -4876,6 +4886,7 @@ mod tests {
                 selector: "label:runtime-review".to_string(),
                 query: "review".to_string(),
                 limit: None,
+                tail: None,
             },
         );
         let find: SessionTranscriptFind =
@@ -5022,9 +5033,28 @@ mod tests {
                 selector: selector.to_string(),
                 query: query.to_string(),
                 limit,
+                tail: None,
             },
         );
         serde_json::from_str(&output).expect("parse transcript-find output")
+    }
+
+    fn transcript_find_tail_output(
+        engine: &RuntimeEngine,
+        selector: &str,
+        query: &str,
+        tail: Option<usize>,
+    ) -> SessionTranscriptFind {
+        let output = render_command(
+            engine,
+            CliCommand::TranscriptFind {
+                selector: selector.to_string(),
+                query: query.to_string(),
+                limit: None,
+                tail,
+            },
+        );
+        serde_json::from_str(&output).expect("parse transcript-find tail output")
     }
 
     #[test]
@@ -5045,6 +5075,7 @@ mod tests {
                 selector: id.clone(),
                 query: "review".to_string(),
                 limit: None,
+                tail: None,
             },
         );
         let explicit_large = render_command(
@@ -5053,6 +5084,7 @@ mod tests {
                 selector: id.clone(),
                 query: "review".to_string(),
                 limit: Some(usize::MAX),
+                tail: None,
             },
         );
         assert_eq!(baseline, explicit_large);
@@ -5290,6 +5322,321 @@ mod tests {
         assert!(
             rendered.contains("--limit") || rendered.contains("not-a-number"),
             "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn transcript_find_omitted_tail_preserves_unlimited_behavior_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(
+            &engine,
+            &id,
+            &["add summary", "review tools", "final polish", "another review"],
+        );
+
+        let baseline = render_command(
+            &engine,
+            CliCommand::TranscriptFind {
+                selector: id.clone(),
+                query: "review".to_string(),
+                limit: None,
+                tail: None,
+            },
+        );
+        let explicit_omitted_tail = render_command(
+            &engine,
+            CliCommand::TranscriptFind {
+                selector: id.clone(),
+                query: "review".to_string(),
+                limit: None,
+                tail: None,
+            },
+        );
+        assert_eq!(
+            baseline, explicit_omitted_tail,
+            "omitted --tail must preserve the existing unlimited behavior exactly"
+        );
+
+        let parsed: SessionTranscriptFind =
+            serde_json::from_str(&baseline).expect("parse transcript-find baseline");
+        assert_eq!(parsed.match_count, 3);
+        let indices: Vec<usize> = parsed.matches.iter().map(|m| m.turn_index.0).collect();
+        assert_eq!(indices, vec![0, 2, 4]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_tail_zero_returns_empty_matches_without_mutating_store() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "review first");
+        extend_transcript(&engine, &id, &["review second", "unrelated"]);
+        let before_session = engine.load_session(&id).expect("reload session");
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let find = transcript_find_tail_output(&engine, &id, "review", Some(0));
+        assert_eq!(find.resolved_session_id.to_string(), id);
+        assert_eq!(find.total_entries, 3);
+        assert_eq!(find.match_count, 0);
+        assert!(
+            find.matches.is_empty(),
+            "--tail 0 must return an empty matches array"
+        );
+
+        let after_session = engine.load_session(&id).expect("reload after find");
+        let after_transcript = engine.load_transcript(&id).expect("reload transcript after find");
+        assert_eq!(
+            after_session, before_session,
+            "--tail 0 must not mutate the persisted session state"
+        );
+        assert_eq!(
+            after_transcript, before_transcript,
+            "--tail 0 must not mutate the persisted transcript"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_tail_returns_newest_n_matches_in_turn_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(
+            &engine,
+            &id,
+            &["add summary", "review tools", "final polish", "another review"],
+        );
+
+        let find = transcript_find_tail_output(&engine, &id, "review", Some(2));
+        assert_eq!(find.total_entries, 5);
+        assert_eq!(find.match_count, 2);
+        let indices: Vec<usize> = find.matches.iter().map(|m| m.turn_index.0).collect();
+        assert_eq!(
+            indices,
+            vec![2, 4],
+            "--tail <n> must return the newest n matches in ascending turn_index order"
+        );
+        let prompts: Vec<&str> = find.matches.iter().map(|m| m.prompt.0.as_str()).collect();
+        assert_eq!(prompts, vec!["review tools", "another review"]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_tail_one_returns_only_newest_match() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(
+            &engine,
+            &id,
+            &["add summary", "review tools", "final polish", "another review"],
+        );
+
+        let find = transcript_find_tail_output(&engine, &id, "review", Some(1));
+        assert_eq!(find.total_entries, 5);
+        assert_eq!(find.match_count, 1);
+        assert_eq!(find.matches.len(), 1);
+        assert_eq!(find.matches[0].turn_index.0, 4);
+        assert_eq!(find.matches[0].prompt.0, "another review");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_tail_larger_than_matches_returns_all_matches() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(&engine, &id, &["review tools", "unrelated"]);
+
+        let find = transcript_find_tail_output(&engine, &id, "review", Some(99));
+        assert_eq!(find.total_entries, 3);
+        assert_eq!(find.match_count, 2);
+        let indices: Vec<usize> = find.matches.iter().map(|m| m.turn_index.0).collect();
+        assert_eq!(indices, vec![0, 1]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_tail_latest_selector_resolves_to_newest_persisted_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older review");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer review");
+        extend_transcript(&engine, &newer, &["second review step", "unrelated step"]);
+
+        let find = transcript_find_tail_output(&engine, "latest", "review", Some(1));
+        assert_eq!(find.selector, "latest");
+        assert_eq!(
+            find.resolved_session_id.to_string(),
+            newer,
+            "latest must resolve to the most recent persisted session under --tail"
+        );
+        assert_eq!(find.total_entries, 3);
+        assert_eq!(find.match_count, 1);
+        assert_eq!(find.matches[0].turn_index.0, 1);
+        assert_eq!(find.matches[0].prompt.0, "second review step");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_tail_label_selector_surfaces_resolved_id_and_does_not_mutate_store() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled review");
+        extend_transcript(&engine, &id, &["second review", "unrelated step"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for find --tail");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptFind {
+                selector: "label:runtime-review".to_string(),
+                query: "review".to_string(),
+                limit: None,
+                tail: Some(1),
+            },
+        );
+        let find: SessionTranscriptFind =
+            serde_json::from_str(&output).expect("parse transcript-find tail label output");
+        assert_eq!(find.selector, "label:runtime-review");
+        assert_eq!(find.resolved_session_id.to_string(), id);
+        assert!(
+            !output.contains("\"resolved_session_id\": \"label:runtime-review\""),
+            "resolved_session_id must surface the persisted id, not the typed selector: {output}"
+        );
+        assert_eq!(find.match_count, 1);
+        assert_eq!(find.matches[0].turn_index.0, 1);
+        assert_eq!(find.matches[0].prompt.0, "second review");
+
+        let reloaded = engine.load_session(&id).expect("reload after find --tail");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+        let reloaded_transcript = engine
+            .load_transcript(&id)
+            .expect("reload transcript after find --tail");
+        assert_eq!(reloaded_transcript.entries.len(), 3);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_tail_empty_or_no_match_query_returns_empty_matches_regardless_of_tail() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt"]);
+
+        for tail in [None, Some(0), Some(5)] {
+            let empty = transcript_find_tail_output(&engine, &id, "", tail);
+            assert_eq!(empty.query, "");
+            assert_eq!(empty.total_entries, 2);
+            assert_eq!(empty.match_count, 0);
+            assert!(empty.matches.is_empty());
+
+            let no_match =
+                transcript_find_tail_output(&engine, &id, "definitely-not-present", tail);
+            assert_eq!(no_match.total_entries, 2);
+            assert_eq!(no_match.match_count, 0);
+            assert!(no_match.matches.is_empty());
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_tail_does_not_mutate_persisted_transcript_or_metadata() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(&engine, &id, &["review tools", "final polish"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let before_session = engine.load_session(&id).expect("reload session");
+
+        let _ = transcript_find_tail_output(&engine, &id, "review", Some(0));
+        let _ = transcript_find_tail_output(&engine, &id, "review", Some(1));
+        let _ = transcript_find_tail_output(&engine, &id, "review", Some(99));
+
+        let after_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let after_session = engine.load_session(&id).expect("reload session");
+        assert_eq!(after_transcript, before_transcript);
+        assert_eq!(after_session, before_session);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_invalid_tail_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-find",
+            "some-id",
+            "review",
+            "--tail",
+            "-1",
+        ])
+        .expect_err("negative --tail must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--tail") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --tail value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-find",
+            "some-id",
+            "review",
+            "--tail",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --tail must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--tail") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --tail value, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn transcript_find_limit_and_tail_are_mutually_exclusive_at_parse_time() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-find",
+            "some-id",
+            "review",
+            "--limit",
+            "1",
+            "--tail",
+            "1",
+        ])
+        .expect_err("--limit and --tail together must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("--tail"),
+            "expected parse error to mention the conflicting flags, got: {rendered}"
         );
     }
 
