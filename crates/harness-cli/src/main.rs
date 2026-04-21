@@ -155,6 +155,8 @@ enum CliCommand {
     },
     TranscriptMissingTurnIndexes {
         selector: String,
+        #[arg(long)]
+        limit: Option<usize>,
     },
     TranscriptTurnDensity {
         selector: String,
@@ -411,10 +413,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             serde_json::to_string_pretty(&has_turn_gaps)
                 .expect("serialize transcript has-turn-gaps")
         }
-        CliCommand::TranscriptMissingTurnIndexes { selector } => {
-            let missing = engine
+        CliCommand::TranscriptMissingTurnIndexes { selector, limit } => {
+            let mut missing = engine
                 .missing_turn_indexes_session_transcript(&selector)
                 .expect("missing-turn-indexes persisted session transcript");
+            if let Some(limit) = limit {
+                missing.missing_turn_indexes.truncate(limit);
+            }
             serde_json::to_string_pretty(&missing)
                 .expect("serialize transcript missing-turn-indexes")
         }
@@ -8265,6 +8270,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptMissingTurnIndexes {
                 selector: id.clone(),
+                limit: None,
             },
         );
         let missing: SessionTranscriptMissingTurnIndexes =
@@ -8309,6 +8315,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptMissingTurnIndexes {
                 selector: "latest".to_string(),
+                limit: None,
             },
         );
         let missing: SessionTranscriptMissingTurnIndexes = serde_json::from_str(&output)
@@ -8337,6 +8344,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptMissingTurnIndexes {
                 selector: "label:runtime-review".to_string(),
+                limit: None,
             },
         );
         let missing: SessionTranscriptMissingTurnIndexes = serde_json::from_str(&output)
@@ -8584,6 +8592,347 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    fn seed_multi_gap_transcript(engine: &RuntimeEngine) -> String {
+        use harness_core::{Prompt, TurnIndex};
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist seed session");
+
+        let gap_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: vec![
+                TranscriptEntry {
+                    turn_index: TurnIndex(1),
+                    prompt: Prompt::new("turn one"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(4),
+                    prompt: Prompt::new("turn four - gaps at 2, 3"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(7),
+                    prompt: Prompt::new("turn seven - gaps at 5, 6"),
+                },
+            ],
+        };
+        engine
+            .store
+            .save_transcript(&gap_transcript)
+            .expect("persist multi-gap transcript");
+
+        session_id
+    }
+
+    fn transcript_missing_turn_indexes_output(
+        engine: &RuntimeEngine,
+        selector: &str,
+        limit: Option<usize>,
+    ) -> SessionTranscriptMissingTurnIndexes {
+        let output = render_command(
+            engine,
+            CliCommand::TranscriptMissingTurnIndexes {
+                selector: selector.to_string(),
+                limit,
+            },
+        );
+        serde_json::from_str(&output).expect("parse transcript-missing-turn-indexes output")
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_omitted_limit_preserves_current_unlimited_behavior_exactly()
+    {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_multi_gap_transcript(&engine);
+
+        let baseline = render_command(
+            &engine,
+            CliCommand::TranscriptMissingTurnIndexes {
+                selector: session_id.clone(),
+                limit: None,
+            },
+        );
+        let explicit_large = render_command(
+            &engine,
+            CliCommand::TranscriptMissingTurnIndexes {
+                selector: session_id.clone(),
+                limit: Some(usize::MAX),
+            },
+        );
+        assert_eq!(baseline, explicit_large);
+
+        let parsed: serde_json::Value = serde_json::from_str(&baseline)
+            .expect("parse transcript-missing-turn-indexes baseline");
+        assert!(
+            parsed.is_object(),
+            "transcript-missing-turn-indexes must return an object, got: {baseline}"
+        );
+        for key in [
+            "selector",
+            "resolved_session_id",
+            "created_at_ms",
+            "updated_at_ms",
+            "total_entries",
+            "missing_turn_indexes",
+        ] {
+            assert!(
+                parsed.get(key).is_some(),
+                "expected key {key} in transcript-missing-turn-indexes output, got: {baseline}"
+            );
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_with_limit_zero_returns_empty_missing_but_full_total_entries()
+    {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_multi_gap_transcript(&engine);
+        let before_transcript = engine.load_transcript(&session_id).expect("reload transcript");
+
+        let missing = transcript_missing_turn_indexes_output(&engine, &session_id, Some(0));
+        assert_eq!(missing.total_entries, 3);
+        assert!(missing.missing_turn_indexes.is_empty());
+
+        let after_transcript = engine
+            .load_transcript(&session_id)
+            .expect("reload after missing-turn-indexes");
+        assert_eq!(after_transcript, before_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_with_limit_one_returns_only_first_missing_index_ascending() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_multi_gap_transcript(&engine);
+
+        let missing = transcript_missing_turn_indexes_output(&engine, &session_id, Some(1));
+        assert_eq!(missing.total_entries, 3);
+        assert_eq!(missing.missing_turn_indexes, vec![2]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_with_limit_smaller_than_total_truncates_in_ascending_order()
+    {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_multi_gap_transcript(&engine);
+
+        let missing = transcript_missing_turn_indexes_output(&engine, &session_id, Some(3));
+        assert_eq!(missing.total_entries, 3);
+        assert_eq!(missing.missing_turn_indexes, vec![2, 3, 5]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_with_limit_larger_than_total_returns_all_missing_indexes() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_multi_gap_transcript(&engine);
+
+        let missing = transcript_missing_turn_indexes_output(&engine, &session_id, Some(99));
+        assert_eq!(missing.total_entries, 3);
+        assert_eq!(missing.missing_turn_indexes, vec![2, 3, 5, 6]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_empty_transcript_with_and_without_limit_returns_empty_array()
+    {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        for limit in [None, Some(0), Some(5)] {
+            let missing = transcript_missing_turn_indexes_output(&engine, &session_id, limit);
+            assert_eq!(missing.total_entries, 0);
+            assert!(missing.missing_turn_indexes.is_empty());
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_single_entry_and_contiguous_transcripts_succeed_with_any_limit(
+    ) {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let single_id = bootstrap_session_id(&engine, "only prompt");
+        for limit in [None, Some(0), Some(1), Some(99)] {
+            let missing = transcript_missing_turn_indexes_output(&engine, &single_id, limit);
+            assert_eq!(missing.total_entries, 1);
+            assert!(missing.missing_turn_indexes.is_empty());
+        }
+
+        let contiguous_id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &contiguous_id, &["second prompt", "third prompt"]);
+        for limit in [None, Some(0), Some(2), Some(99)] {
+            let missing = transcript_missing_turn_indexes_output(&engine, &contiguous_id, limit);
+            assert_eq!(missing.total_entries, 3);
+            assert!(missing.missing_turn_indexes.is_empty());
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_latest_selector_honors_limit() {
+        use harness_core::{Prompt, TurnIndex};
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let newer = session.session_id.to_string();
+        engine.store.save(&session).expect("persist newer session");
+        let gap_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: vec![
+                TranscriptEntry {
+                    turn_index: TurnIndex(1),
+                    prompt: Prompt::new("newer turn one"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(4),
+                    prompt: Prompt::new("newer turn four"),
+                },
+            ],
+        };
+        engine
+            .store
+            .save_transcript(&gap_transcript)
+            .expect("persist newer gap transcript");
+
+        let missing = transcript_missing_turn_indexes_output(&engine, "latest", Some(1));
+        assert_eq!(missing.selector, "latest");
+        assert_eq!(missing.resolved_session_id.to_string(), newer);
+        assert_eq!(missing.total_entries, 2);
+        assert_eq!(missing.missing_turn_indexes, vec![2]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_label_selector_honors_limit() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_multi_gap_transcript(&engine);
+        engine
+            .rename_session(&session_id, "runtime-review")
+            .expect("attach label for missing-turn-indexes");
+
+        let missing = transcript_missing_turn_indexes_output(
+            &engine,
+            "label:runtime-review",
+            Some(2),
+        );
+        assert_eq!(missing.selector, "label:runtime-review");
+        assert_eq!(missing.resolved_session_id.to_string(), session_id);
+        assert_eq!(missing.total_entries, 3);
+        assert_eq!(missing.missing_turn_indexes, vec![2, 3]);
+
+        let reloaded = engine
+            .load_session(&session_id)
+            .expect("reload after missing-turn-indexes");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_limit_does_not_mutate_persisted_transcript_or_metadata() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_multi_gap_transcript(&engine);
+
+        let before_transcript = engine.load_transcript(&session_id).expect("reload transcript");
+        let before_session = engine.load_session(&session_id).expect("reload session");
+
+        let _ = transcript_missing_turn_indexes_output(&engine, &session_id, Some(0));
+        let _ = transcript_missing_turn_indexes_output(&engine, &session_id, Some(1));
+        let _ = transcript_missing_turn_indexes_output(&engine, &session_id, Some(99));
+
+        let after_transcript = engine.load_transcript(&session_id).expect("reload transcript");
+        let after_session = engine.load_session(&session_id).expect("reload session");
+        assert_eq!(after_transcript, before_transcript);
+        assert_eq!(after_session, before_session);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_missing_turn_indexes_invalid_limit_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-missing-turn-indexes",
+            "some-id",
+            "--limit",
+            "-1",
+        ])
+        .expect_err("negative --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-missing-turn-indexes",
+            "some-id",
+            "--limit",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
     }
 
     #[test]
