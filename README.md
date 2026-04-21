@@ -426,6 +426,12 @@ cargo run -q -p harness-cli -- sessions
 ]
 ```
 
+Pass `--limit <n>` to cap the listing to at most the newest `n` persisted sessions in the existing newest-first ordering. The per-row JSON shape is preserved — `--limit` only truncates the array, it does not wrap the output. `--limit 0` returns an empty array cleanly, a `--limit` larger than the store returns every available session, and omitting `--limit` preserves the unlimited listing above exactly.
+
+```bash
+cargo run -q -p harness-cli -- sessions --limit 1
+```
+
 ### `session-show <id>`
 
 ```bash
