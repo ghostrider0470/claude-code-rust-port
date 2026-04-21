@@ -190,6 +190,8 @@ enum CliCommand {
         selector: String,
         #[arg(long)]
         limit: Option<usize>,
+        #[arg(long, conflicts_with = "limit")]
+        tail: Option<usize>,
     },
     TranscriptLargestGap {
         selector: String,
@@ -520,12 +522,20 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             serde_json::to_string_pretty(&density)
                 .expect("serialize transcript turn-density")
         }
-        CliCommand::TranscriptGapRanges { selector, limit } => {
+        CliCommand::TranscriptGapRanges {
+            selector,
+            limit,
+            tail,
+        } => {
             let mut gap_ranges = engine
                 .gap_ranges_session_transcript(&selector)
                 .expect("gap-ranges persisted session transcript");
             if let Some(limit) = limit {
                 gap_ranges.gap_ranges.truncate(limit);
+            } else if let Some(tail) = tail {
+                let total = gap_ranges.gap_ranges.len();
+                let skip = total.saturating_sub(tail);
+                gap_ranges.gap_ranges.drain(..skip);
             }
             serde_json::to_string_pretty(&gap_ranges)
                 .expect("serialize transcript gap-ranges")
@@ -10804,6 +10814,7 @@ mod tests {
             CliCommand::TranscriptGapRanges {
                 selector: id.clone(),
                 limit: None,
+                tail: None,
             },
         );
         let gap_ranges: SessionTranscriptGapRanges =
@@ -10850,6 +10861,7 @@ mod tests {
             CliCommand::TranscriptGapRanges {
                 selector: "latest".to_string(),
                 limit: None,
+                tail: None,
             },
         );
         let gap_ranges: SessionTranscriptGapRanges =
@@ -10879,6 +10891,7 @@ mod tests {
             CliCommand::TranscriptGapRanges {
                 selector: "label:runtime-review".to_string(),
                 limit: None,
+                tail: None,
             },
         );
         let gap_ranges: SessionTranscriptGapRanges =
@@ -11201,9 +11214,26 @@ mod tests {
             CliCommand::TranscriptGapRanges {
                 selector: selector.to_string(),
                 limit,
+                tail: None,
             },
         );
         serde_json::from_str(&output).expect("parse transcript-gap-ranges output")
+    }
+
+    fn transcript_gap_ranges_tail_output(
+        engine: &RuntimeEngine,
+        selector: &str,
+        tail: Option<usize>,
+    ) -> SessionTranscriptGapRanges {
+        let output = render_command(
+            engine,
+            CliCommand::TranscriptGapRanges {
+                selector: selector.to_string(),
+                limit: None,
+                tail,
+            },
+        );
+        serde_json::from_str(&output).expect("parse transcript-gap-ranges tail output")
     }
 
     #[test]
@@ -11218,6 +11248,7 @@ mod tests {
             CliCommand::TranscriptGapRanges {
                 selector: session_id.clone(),
                 limit: None,
+                tail: None,
             },
         );
         let explicit_large = render_command(
@@ -11225,6 +11256,7 @@ mod tests {
             CliCommand::TranscriptGapRanges {
                 selector: session_id.clone(),
                 limit: Some(usize::MAX),
+                tail: None,
             },
         );
         assert_eq!(baseline, explicit_large);
@@ -11551,6 +11583,375 @@ mod tests {
         assert!(
             rendered.contains("--limit") || rendered.contains("not-a-number"),
             "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn transcript_gap_ranges_omitted_tail_preserves_unlimited_behavior_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_triple_gap_transcript(&engine);
+
+        let baseline = render_command(
+            &engine,
+            CliCommand::TranscriptGapRanges {
+                selector: session_id.clone(),
+                limit: None,
+                tail: None,
+            },
+        );
+        let explicit_omitted_tail = render_command(
+            &engine,
+            CliCommand::TranscriptGapRanges {
+                selector: session_id.clone(),
+                limit: None,
+                tail: None,
+            },
+        );
+        assert_eq!(
+            baseline, explicit_omitted_tail,
+            "omitted --tail must preserve the existing unlimited behavior exactly"
+        );
+
+        let parsed: SessionTranscriptGapRanges =
+            serde_json::from_str(&baseline).expect("parse transcript-gap-ranges baseline");
+        assert_eq!(parsed.total_entries, 5);
+        assert_eq!(
+            parsed.gap_ranges,
+            vec![
+                SessionTranscriptGapRange {
+                    start_turn_index: 2,
+                    end_turn_index: 3,
+                    missing_count: 2,
+                },
+                SessionTranscriptGapRange {
+                    start_turn_index: 6,
+                    end_turn_index: 8,
+                    missing_count: 3,
+                },
+                SessionTranscriptGapRange {
+                    start_turn_index: 10,
+                    end_turn_index: 11,
+                    missing_count: 2,
+                },
+            ]
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_ranges_tail_zero_returns_empty_ranges_but_full_total_entries() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_triple_gap_transcript(&engine);
+        let before_session = engine.load_session(&session_id).expect("reload session");
+        let before_transcript = engine
+            .load_transcript(&session_id)
+            .expect("reload transcript");
+
+        let gap_ranges = transcript_gap_ranges_tail_output(&engine, &session_id, Some(0));
+        assert_eq!(
+            gap_ranges.total_entries, 5,
+            "--tail 0 must keep total_entries at the persisted transcript length"
+        );
+        assert!(
+            gap_ranges.gap_ranges.is_empty(),
+            "--tail 0 must return an empty gap_ranges array"
+        );
+
+        let after_session = engine
+            .load_session(&session_id)
+            .expect("reload after gap-ranges");
+        let after_transcript = engine
+            .load_transcript(&session_id)
+            .expect("reload transcript after gap-ranges");
+        assert_eq!(
+            after_session, before_session,
+            "--tail 0 must not mutate the persisted session state"
+        );
+        assert_eq!(
+            after_transcript, before_transcript,
+            "--tail 0 must not mutate the persisted transcript"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_ranges_tail_returns_newest_n_ranges_in_ascending_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_triple_gap_transcript(&engine);
+
+        let gap_ranges = transcript_gap_ranges_tail_output(&engine, &session_id, Some(2));
+        assert_eq!(gap_ranges.resolved_session_id.to_string(), session_id);
+        assert_eq!(gap_ranges.total_entries, 5);
+        assert_eq!(
+            gap_ranges.gap_ranges,
+            vec![
+                SessionTranscriptGapRange {
+                    start_turn_index: 6,
+                    end_turn_index: 8,
+                    missing_count: 3,
+                },
+                SessionTranscriptGapRange {
+                    start_turn_index: 10,
+                    end_turn_index: 11,
+                    missing_count: 2,
+                },
+            ],
+            "--tail <n> must return only the newest n gap ranges, preserving ascending order"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_ranges_tail_larger_than_total_returns_all_ranges_unchanged() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_triple_gap_transcript(&engine);
+
+        let gap_ranges = transcript_gap_ranges_tail_output(&engine, &session_id, Some(99));
+        assert_eq!(gap_ranges.total_entries, 5);
+        assert_eq!(
+            gap_ranges.gap_ranges,
+            vec![
+                SessionTranscriptGapRange {
+                    start_turn_index: 2,
+                    end_turn_index: 3,
+                    missing_count: 2,
+                },
+                SessionTranscriptGapRange {
+                    start_turn_index: 6,
+                    end_turn_index: 8,
+                    missing_count: 3,
+                },
+                SessionTranscriptGapRange {
+                    start_turn_index: 10,
+                    end_turn_index: 11,
+                    missing_count: 2,
+                },
+            ],
+            "oversized --tail must return every gap range cleanly"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_ranges_tail_empty_and_contiguous_transcripts_return_empty_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let empty_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        for tail in [None, Some(0), Some(5)] {
+            let gap_ranges = transcript_gap_ranges_tail_output(&engine, &empty_id, tail);
+            assert_eq!(gap_ranges.total_entries, 0);
+            assert!(gap_ranges.gap_ranges.is_empty());
+        }
+
+        let contiguous_id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &contiguous_id, &["second prompt", "third prompt"]);
+        for tail in [None, Some(0), Some(2), Some(99)] {
+            let gap_ranges = transcript_gap_ranges_tail_output(&engine, &contiguous_id, tail);
+            assert_eq!(gap_ranges.total_entries, 3);
+            assert!(gap_ranges.gap_ranges.is_empty());
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_ranges_tail_latest_selector_resolves_to_newest_persisted_session() {
+        use harness_core::{Prompt, TurnIndex};
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let newer = session.session_id.to_string();
+        engine.store.save(&session).expect("persist newer session");
+        let gap_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: vec![
+                TranscriptEntry {
+                    turn_index: TurnIndex(1),
+                    prompt: Prompt::new("newer turn one"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(4),
+                    prompt: Prompt::new("newer turn four - gap at 2, 3"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(8),
+                    prompt: Prompt::new("newer turn eight - gap at 5, 6, 7"),
+                },
+            ],
+        };
+        engine
+            .store
+            .save_transcript(&gap_transcript)
+            .expect("persist newer gap transcript");
+
+        let gap_ranges = transcript_gap_ranges_tail_output(&engine, "latest", Some(1));
+        assert_eq!(gap_ranges.selector, "latest");
+        assert_eq!(gap_ranges.resolved_session_id.to_string(), newer);
+        assert_eq!(gap_ranges.total_entries, 3);
+        assert_eq!(
+            gap_ranges.gap_ranges,
+            vec![SessionTranscriptGapRange {
+                start_turn_index: 5,
+                end_turn_index: 7,
+                missing_count: 3,
+            }],
+            "--tail must surface the newest gap range of the resolved latest session"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_ranges_tail_label_selector_surfaces_resolved_id_and_does_not_mutate_store() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_triple_gap_transcript(&engine);
+        engine
+            .rename_session(&session_id, "runtime-review")
+            .expect("attach label for gap-ranges --tail");
+
+        let gap_ranges =
+            transcript_gap_ranges_tail_output(&engine, "label:runtime-review", Some(2));
+        assert_eq!(gap_ranges.selector, "label:runtime-review");
+        assert_eq!(gap_ranges.resolved_session_id.to_string(), session_id);
+        assert_eq!(gap_ranges.total_entries, 5);
+        assert_eq!(
+            gap_ranges.gap_ranges,
+            vec![
+                SessionTranscriptGapRange {
+                    start_turn_index: 6,
+                    end_turn_index: 8,
+                    missing_count: 3,
+                },
+                SessionTranscriptGapRange {
+                    start_turn_index: 10,
+                    end_turn_index: 11,
+                    missing_count: 2,
+                },
+            ]
+        );
+
+        let reloaded = engine
+            .load_session(&session_id)
+            .expect("reload after gap-ranges --tail");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_ranges_tail_does_not_mutate_persisted_transcript_or_metadata() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = seed_triple_gap_transcript(&engine);
+
+        let before_transcript = engine
+            .load_transcript(&session_id)
+            .expect("reload transcript");
+        let before_session = engine.load_session(&session_id).expect("reload session");
+
+        let _ = transcript_gap_ranges_tail_output(&engine, &session_id, Some(0));
+        let _ = transcript_gap_ranges_tail_output(&engine, &session_id, Some(1));
+        let _ = transcript_gap_ranges_tail_output(&engine, &session_id, Some(99));
+
+        let after_transcript = engine
+            .load_transcript(&session_id)
+            .expect("reload transcript");
+        let after_session = engine.load_session(&session_id).expect("reload session");
+        assert_eq!(after_transcript, before_transcript);
+        assert_eq!(after_session, before_session);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_gap_ranges_invalid_tail_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-gap-ranges",
+            "some-id",
+            "--tail",
+            "-1",
+        ])
+        .expect_err("negative --tail must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--tail") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --tail value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-gap-ranges",
+            "some-id",
+            "--tail",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --tail must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--tail") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --tail value, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn transcript_gap_ranges_limit_and_tail_are_mutually_exclusive_at_parse_time() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-gap-ranges",
+            "some-id",
+            "--limit",
+            "1",
+            "--tail",
+            "1",
+        ])
+        .expect_err("--limit and --tail together must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("--tail"),
+            "expected parse error to mention the conflicting flags, got: {rendered}"
         );
     }
 
