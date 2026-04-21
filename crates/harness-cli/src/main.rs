@@ -70,7 +70,10 @@ enum CliCommand {
         id: String,
         label: String,
     },
-    SessionLabels,
+    SessionLabels {
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     SessionPins,
     SessionPrune {
         #[arg(long)]
@@ -258,10 +261,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("retag persisted session");
             serde_json::to_string_pretty(&retagged).expect("serialize session retag")
         }
-        CliCommand::SessionLabels => {
-            let labels = engine
+        CliCommand::SessionLabels { limit } => {
+            let mut labels = engine
                 .list_session_labels()
                 .expect("list persisted session labels");
+            if let Some(limit) = limit {
+                labels.truncate(limit);
+            }
             serde_json::to_string_pretty(&labels).expect("serialize session labels")
         }
         CliCommand::SessionPins => {
@@ -2054,7 +2060,7 @@ mod tests {
             },
         );
 
-        let labels_output = render_command(&engine, CliCommand::SessionLabels);
+        let labels_output = render_command(&engine, CliCommand::SessionLabels { limit: None });
 
         let entries: Vec<SessionLabelEntry> =
             serde_json::from_str(&labels_output).expect("parse session-labels output");
@@ -2097,7 +2103,7 @@ mod tests {
                 label: "runtime-review".to_string(),
             },
         );
-        let labels_output = render_command(&readme_engine, CliCommand::SessionLabels);
+        let labels_output = render_command(&readme_engine, CliCommand::SessionLabels { limit: None });
 
         assert_eq!(
             normalize_bootstrap_example(&labels_output, &session_id, &readme_root),
@@ -2151,7 +2157,7 @@ mod tests {
             },
         );
 
-        let labels_output = render_command(&engine, CliCommand::SessionLabels);
+        let labels_output = render_command(&engine, CliCommand::SessionLabels { limit: None });
         let entries: Vec<SessionLabelEntry> =
             serde_json::from_str(&labels_output).expect("parse session-labels output");
         assert_eq!(
@@ -2172,7 +2178,7 @@ mod tests {
         let engine = temp_engine(&root);
 
         // Truly empty store: no persisted sessions at all.
-        let output = render_command(&engine, CliCommand::SessionLabels);
+        let output = render_command(&engine, CliCommand::SessionLabels { limit: None });
         assert_eq!(
             output,
             readme_output_block("session-labels <empty-store>", "json"),
@@ -2186,7 +2192,7 @@ mod tests {
                 prompt: "no label".to_string(),
             },
         );
-        let output = render_command(&engine, CliCommand::SessionLabels);
+        let output = render_command(&engine, CliCommand::SessionLabels { limit: None });
         assert_eq!(
             output,
             readme_output_block("session-labels <empty-store>", "json"),
@@ -2194,6 +2200,251 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    fn labeled_session_ids(engine: &RuntimeEngine, limit: Option<usize>) -> Vec<String> {
+        let output = render_command(engine, CliCommand::SessionLabels { limit });
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("parse session-labels output");
+        parsed
+            .as_array()
+            .expect("session-labels output is a JSON array")
+            .iter()
+            .map(|entry| {
+                entry["session_id"]
+                    .as_str()
+                    .expect("session_id in session-labels output")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn label_session(engine: &RuntimeEngine, id: &str, label: &str) {
+        let _ = render_command(
+            engine,
+            CliCommand::SessionRename {
+                id: id.to_string(),
+                label: label.to_string(),
+            },
+        );
+    }
+
+    #[test]
+    fn session_labels_omitted_limit_preserves_current_unlimited_behavior_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let older_id = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer_id = bootstrap_session_id(&engine, "newer");
+        label_session(&engine, &older_id, "runtime-review");
+        label_session(&engine, &newer_id, "release-candidate");
+
+        let baseline = render_command(&engine, CliCommand::SessionLabels { limit: None });
+        let explicit_large = render_command(
+            &engine,
+            CliCommand::SessionLabels {
+                limit: Some(usize::MAX),
+            },
+        );
+        assert_eq!(baseline, explicit_large);
+
+        // Per-row JSON shape is the bare array — no wrapper object.
+        assert!(baseline.trim_start().starts_with('['));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_labels_with_limit_zero_returns_empty_array_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "only one");
+        label_session(&engine, &id, "runtime-review");
+
+        let output = render_command(&engine, CliCommand::SessionLabels { limit: Some(0) });
+        assert_eq!(output, "[]");
+
+        // The store itself is untouched — default listing still returns the label.
+        assert_eq!(labeled_session_ids(&engine, None), vec![id]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_labels_with_limit_one_returns_only_newest_preserving_ordering() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let older_id = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer_id = bootstrap_session_id(&engine, "newer");
+        label_session(&engine, &older_id, "runtime-review");
+        label_session(&engine, &newer_id, "release-candidate");
+
+        let limited = labeled_session_ids(&engine, Some(1));
+        assert_eq!(limited, vec![newer_id.clone()]);
+
+        let unlimited = labeled_session_ids(&engine, None);
+        assert_eq!(unlimited, vec![newer_id, older_id]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_labels_with_limit_smaller_than_labeled_subset_returns_prefix_of_default_ordering() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Three labeled sessions plus one unlabeled middle to prove the
+        // limit slices the labeled listing, not the raw sessions listing.
+        let a = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let unlabeled = bootstrap_session_id(&engine, "unlabeled middle");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "second");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let c = bootstrap_session_id(&engine, "third");
+
+        label_session(&engine, &a, "alpha");
+        label_session(&engine, &b, "beta");
+        label_session(&engine, &c, "gamma");
+
+        let unlimited = labeled_session_ids(&engine, None);
+        assert_eq!(unlimited, vec![c.clone(), b.clone(), a.clone()]);
+        assert!(
+            !unlimited.iter().any(|id| id == &unlabeled),
+            "unlabeled session must stay omitted in default listing"
+        );
+
+        let limited = labeled_session_ids(&engine, Some(2));
+        assert_eq!(limited, unlimited[..2].to_vec());
+        assert!(
+            !limited.iter().any(|id| id == &unlabeled),
+            "unlabeled session must stay omitted under limiting"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_labels_with_limit_exceeding_labeled_subset_returns_all_labeled_sessions() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _unlabeled = bootstrap_session_id(&engine, "unlabeled middle");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "second");
+        label_session(&engine, &a, "alpha");
+        label_session(&engine, &b, "beta");
+
+        let unlimited = labeled_session_ids(&engine, None);
+        assert_eq!(unlimited, vec![b.clone(), a.clone()]);
+
+        let limited = labeled_session_ids(&engine, Some(99));
+        assert_eq!(limited, unlimited);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_labels_with_limit_keeps_duplicate_labels_visible_as_separate_rows() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first_id = bootstrap_session_id(&engine, "alpha");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second_id = bootstrap_session_id(&engine, "beta");
+        label_session(&engine, &first_id, "dup");
+        label_session(&engine, &second_id, "dup");
+
+        // limit == duplicate-row count still returns both rows, not just one.
+        let limited_all = render_command(
+            &engine,
+            CliCommand::SessionLabels { limit: Some(2) },
+        );
+        let limited_all_entries: Vec<SessionLabelEntry> =
+            serde_json::from_str(&limited_all).expect("parse limited session-labels");
+        assert_eq!(limited_all_entries.len(), 2);
+        assert!(limited_all_entries.iter().all(|entry| entry.label == "dup"));
+        assert_eq!(limited_all_entries[0].session_id.to_string(), second_id);
+        assert_eq!(limited_all_entries[1].session_id.to_string(), first_id);
+
+        // A tighter limit still slices deterministically from the newest-first
+        // ordering — the duplicate label survives the slice as a single row
+        // rather than being collapsed.
+        let limited_one = render_command(
+            &engine,
+            CliCommand::SessionLabels { limit: Some(1) },
+        );
+        let limited_one_entries: Vec<SessionLabelEntry> =
+            serde_json::from_str(&limited_one).expect("parse single-entry session-labels");
+        assert_eq!(limited_one_entries.len(), 1);
+        assert_eq!(limited_one_entries[0].label, "dup");
+        assert_eq!(limited_one_entries[0].session_id.to_string(), second_id);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_labels_limit_does_not_mutate_persisted_store() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "second");
+        label_session(&engine, &a, "alpha");
+        label_session(&engine, &b, "beta");
+
+        let before_a = engine.load_session(&a).expect("load a before");
+        let before_b = engine.load_session(&b).expect("load b before");
+        let before_ta = engine.load_transcript(&a).expect("transcript a before");
+        let before_tb = engine.load_transcript(&b).expect("transcript b before");
+        let before_labels = render_command(&engine, CliCommand::SessionLabels { limit: None });
+
+        let _ = render_command(&engine, CliCommand::SessionLabels { limit: Some(0) });
+        let _ = render_command(&engine, CliCommand::SessionLabels { limit: Some(1) });
+        let _ = render_command(&engine, CliCommand::SessionLabels { limit: Some(99) });
+
+        assert_eq!(engine.load_session(&a).expect("load a after"), before_a);
+        assert_eq!(engine.load_session(&b).expect("load b after"), before_b);
+        assert_eq!(
+            engine.load_transcript(&a).expect("transcript a after"),
+            before_ta
+        );
+        assert_eq!(
+            engine.load_transcript(&b).expect("transcript b after"),
+            before_tb
+        );
+        let after_labels = render_command(&engine, CliCommand::SessionLabels { limit: None });
+        assert_eq!(after_labels, before_labels);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_labels_invalid_limit_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from(["harness", "session-labels", "--limit", "-1"])
+            .expect_err("negative --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from(["harness", "session-labels", "--limit", "not-a-number"])
+            .expect_err("non-numeric --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
     }
 
     #[test]
@@ -2514,7 +2765,7 @@ mod tests {
             .expect("load transcript before label-selector unlabel");
 
         // The labeled session shows up in session-labels before unlabel.
-        let labels_before = render_command(&engine, CliCommand::SessionLabels);
+        let labels_before = render_command(&engine, CliCommand::SessionLabels { limit: None });
         let labels_before_array: Vec<SessionLabelEntry> =
             serde_json::from_str(&labels_before).expect("parse session-labels before");
         assert_eq!(labels_before_array.len(), 1);
@@ -2540,7 +2791,7 @@ mod tests {
         );
 
         // The unlabeled session disappears from session-labels.
-        let labels_after = render_command(&engine, CliCommand::SessionLabels);
+        let labels_after = render_command(&engine, CliCommand::SessionLabels { limit: None });
         assert_eq!(
             labels_after.trim(),
             "[]",
@@ -2693,7 +2944,7 @@ mod tests {
         );
 
         // session-labels reflects the new label and no longer surfaces the old one.
-        let labels_output = render_command(&engine, CliCommand::SessionLabels);
+        let labels_output = render_command(&engine, CliCommand::SessionLabels { limit: None });
         let labels: Vec<SessionLabelEntry> =
             serde_json::from_str(&labels_output).expect("parse session-labels");
         assert_eq!(labels.len(), 1);
@@ -2809,7 +3060,7 @@ mod tests {
 
         // session-labels reflects the new label while transcript/session content
         // and ordering stay unchanged.
-        let labels_output = render_command(&engine, CliCommand::SessionLabels);
+        let labels_output = render_command(&engine, CliCommand::SessionLabels { limit: None });
         let labels: Vec<SessionLabelEntry> =
             serde_json::from_str(&labels_output).expect("parse session-labels after retag");
         assert_eq!(labels.len(), 1);
