@@ -40,6 +40,8 @@ enum CliCommand {
         selector: String,
         #[arg(long)]
         limit: Option<usize>,
+        #[arg(long, conflicts_with = "limit")]
+        tail: Option<usize>,
     },
     TranscriptShow {
         selector: String,
@@ -225,12 +227,20 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             }
             serde_json::to_string_pretty(&sessions).expect("serialize session list")
         }
-        CliCommand::SessionShow { selector, limit } => {
+        CliCommand::SessionShow {
+            selector,
+            limit,
+            tail,
+        } => {
             let mut session = engine
                 .load_session(&selector)
                 .expect("load session by selector");
             if let Some(limit) = limit {
                 session.messages.truncate(limit);
+            } else if let Some(tail) = tail {
+                let total = session.messages.len();
+                let skip = total.saturating_sub(tail);
+                session.messages.drain(..skip);
             }
             serde_json::to_string_pretty(&session).expect("serialize session")
         }
@@ -1055,6 +1065,7 @@ mod tests {
             CliCommand::SessionShow {
                 selector: session_id.clone(),
                 limit: None,
+                tail: None,
             },
         );
         let session: SessionState =
@@ -1118,6 +1129,7 @@ mod tests {
             CliCommand::SessionShow {
                 selector: session_id.clone(),
                 limit: None,
+                tail: None,
             },
         );
         let reloaded: SessionState =
@@ -2356,6 +2368,7 @@ mod tests {
             CliCommand::SessionShow {
                 selector: session_id.clone(),
                 limit: None,
+                tail: None,
             },
         );
         assert!(
@@ -2376,6 +2389,7 @@ mod tests {
             CliCommand::SessionShow {
                 selector: session_id.clone(),
                 limit: None,
+                tail: None,
             },
         );
         assert!(
@@ -2418,6 +2432,7 @@ mod tests {
             CliCommand::SessionShow {
                 selector: session_id.clone(),
                 limit: None,
+                tail: None,
             },
         );
         let raw_state: SessionState =
@@ -2431,6 +2446,7 @@ mod tests {
             CliCommand::SessionShow {
                 selector: "label:runtime-review".to_string(),
                 limit: None,
+                tail: None,
             },
         );
         let labeled_state: SessionState =
@@ -3953,6 +3969,7 @@ mod tests {
             CliCommand::SessionShow {
                 selector: "latest".to_string(),
                 limit: None,
+                tail: None,
             },
         );
 
@@ -12130,9 +12147,26 @@ mod tests {
             CliCommand::SessionShow {
                 selector: selector.to_string(),
                 limit,
+                tail: None,
             },
         );
         serde_json::from_str(&output).expect("parse session-show output")
+    }
+
+    fn session_show_tail_state(
+        engine: &RuntimeEngine,
+        selector: &str,
+        tail: Option<usize>,
+    ) -> SessionState {
+        let output = render_command(
+            engine,
+            CliCommand::SessionShow {
+                selector: selector.to_string(),
+                limit: None,
+                tail,
+            },
+        );
+        serde_json::from_str(&output).expect("parse session-show tail output")
     }
 
     #[test]
@@ -12152,6 +12186,7 @@ mod tests {
             CliCommand::SessionShow {
                 selector: id.clone(),
                 limit: None,
+                tail: None,
             },
         );
         let explicit_large = render_command(
@@ -12159,6 +12194,7 @@ mod tests {
             CliCommand::SessionShow {
                 selector: id.clone(),
                 limit: Some(usize::MAX),
+                tail: None,
             },
         );
         assert_eq!(
@@ -12287,6 +12323,7 @@ mod tests {
             CliCommand::SessionShow {
                 selector: "label:runtime-review".to_string(),
                 limit: Some(2),
+                tail: None,
             },
         );
         let state: SessionState =
@@ -12429,6 +12466,280 @@ mod tests {
             err.contains("ambiguous session label"),
             "expected ambiguous label error, got: {err}"
         );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_omitted_tail_matches_unlimited_baseline_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
+
+        let baseline = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                selector: id.clone(),
+                limit: None,
+                tail: None,
+            },
+        );
+        let explicit_omitted_tail = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                selector: id.clone(),
+                limit: None,
+                tail: None,
+            },
+        );
+        assert_eq!(
+            baseline, explicit_omitted_tail,
+            "omitted --tail must preserve the existing unlimited behavior exactly"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_tail_zero_returns_empty_messages_without_mutating_store() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+        let before_session = engine.load_session(&id).expect("reload session");
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let state = session_show_tail_state(&engine, &id, Some(0));
+        assert_eq!(state.session_id.to_string(), id);
+        assert!(
+            state.messages.is_empty(),
+            "--tail 0 must return an empty messages array"
+        );
+
+        let after_session = engine.load_session(&id).expect("reload after show");
+        let after_transcript = engine.load_transcript(&id).expect("reload transcript after show");
+        assert_eq!(
+            after_session, before_session,
+            "--tail 0 must not mutate the persisted session state"
+        );
+        assert_eq!(
+            after_transcript, before_transcript,
+            "--tail 0 must not mutate the persisted transcript"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_tail_returns_newest_n_messages_in_append_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
+
+        let state = session_show_tail_state(&engine, &id, Some(2));
+        assert_eq!(state.session_id.to_string(), id);
+        let messages: Vec<String> = state
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "third prompt".to_string(),
+                "fourth prompt".to_string(),
+            ],
+            "--tail <n> must return only the newest n messages, preserving canonical append order inside the slice"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_tail_larger_than_total_returns_all_messages_unchanged() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let state = session_show_tail_state(&engine, &id, Some(99));
+        assert_eq!(state.session_id.to_string(), id);
+        let messages: Vec<String> = state
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "first prompt".to_string(),
+                "second prompt".to_string(),
+                "third prompt".to_string(),
+            ],
+            "oversized --tail must return every persisted message cleanly"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_tail_latest_selector_resolves_to_newest_persisted_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older session");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer first");
+        extend_transcript(&engine, &newer, &["newer second", "newer third"]);
+
+        let state = session_show_tail_state(&engine, "latest", Some(1));
+        assert_eq!(
+            state.session_id.to_string(),
+            newer,
+            "latest must resolve to the most recent persisted session under --tail"
+        );
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(
+            state.messages[0].0, "newer third",
+            "--tail 1 must surface the newest persisted message"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_tail_label_selector_surfaces_resolved_id_and_does_not_mutate_store() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled first");
+        extend_transcript(&engine, &id, &["labeled second", "labeled third"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for session-show --tail");
+
+        let output = render_command(
+            &engine,
+            CliCommand::SessionShow {
+                selector: "label:runtime-review".to_string(),
+                limit: None,
+                tail: Some(2),
+            },
+        );
+        let state: SessionState =
+            serde_json::from_str(&output).expect("parse labeled session-show tail");
+        assert_eq!(state.session_id.to_string(), id);
+        assert!(
+            !output.contains("label:runtime-review\""),
+            "JSON must surface the resolved id rather than the typed selector: {output}"
+        );
+        let messages: Vec<String> = state
+            .messages
+            .iter()
+            .map(|prompt| prompt.0.clone())
+            .collect();
+        assert_eq!(
+            messages,
+            vec!["labeled second".to_string(), "labeled third".to_string()],
+            "--tail <n> must surface the newest n messages for a label selector"
+        );
+        assert_eq!(state.label.as_deref(), Some("runtime-review"));
+
+        let reloaded = engine.load_session(&id).expect("reload after session-show --tail");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+        assert_eq!(
+            reloaded.messages.len(),
+            3,
+            "persisted messages must not be mutated by --tail"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_show_invalid_tail_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "session-show",
+            "some-id",
+            "--tail",
+            "-1",
+        ])
+        .expect_err("negative --tail must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--tail") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --tail value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "session-show",
+            "some-id",
+            "--tail",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --tail must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--tail") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --tail value, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn session_show_limit_and_tail_are_mutually_exclusive_at_parse_time() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "session-show",
+            "some-id",
+            "--limit",
+            "1",
+            "--tail",
+            "1",
+        ])
+        .expect_err("--limit and --tail together must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("--tail"),
+            "expected parse error to mention the conflicting flags, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn session_show_tail_raw_id_selector_surfaces_resolved_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let state = session_show_tail_state(&engine, &id, Some(1));
+        assert_eq!(
+            state.session_id.to_string(),
+            id,
+            "raw id selector must round-trip under --tail"
+        );
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].0, "third prompt");
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
