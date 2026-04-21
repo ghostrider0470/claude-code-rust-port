@@ -555,6 +555,18 @@ pub struct SessionTranscriptMissingTurnIndexes {
     pub missing_turn_indexes: Vec<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionTranscriptTurnDensity {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub span_entry_count: usize,
+    pub missing_turn_count: usize,
+    pub turn_density: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -1103,6 +1115,57 @@ impl SessionStore {
             updated_at_ms: transcript.updated_at_ms,
             total_entries,
             missing_turn_indexes,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// deterministic machine-readable summary describing how densely populated
+    /// the resolved persisted transcript's `turn_index` span is, without
+    /// returning transcript entries. `span_entry_count` is the number of
+    /// integer turn positions in the inclusive span from the smallest present
+    /// `turn_index` to the largest present `turn_index`. `missing_turn_count`
+    /// equals `span_entry_count - total_entries`. `turn_density` equals
+    /// `total_entries / span_entry_count` as a deterministic numeric value.
+    /// Empty transcripts succeed cleanly with `total_entries: 0`,
+    /// `span_entry_count: 0`, `missing_turn_count: 0`, and
+    /// `turn_density: 1.0`. Single-entry and contiguous transcripts report
+    /// `missing_turn_count: 0` and `turn_density: 1.0`. The persisted
+    /// transcript is not mutated. Preserves existing selector failure
+    /// semantics unchanged (`SessionNotFound` / `AmbiguousLabel` /
+    /// `MalformedSelector`).
+    pub fn turn_density_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptTurnDensity, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total_entries = transcript.entries.len();
+        let turn_indexes: Vec<usize> = transcript
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .collect();
+        let (span_entry_count, turn_density) = match (
+            turn_indexes.iter().min().copied(),
+            turn_indexes.iter().max().copied(),
+        ) {
+            (Some(min), Some(max)) => {
+                let span = max - min + 1;
+                let density = (total_entries as f64) / (span as f64);
+                (span, density)
+            }
+            _ => (0usize, 1.0f64),
+        };
+        let missing_turn_count = span_entry_count.saturating_sub(total_entries);
+        Ok(SessionTranscriptTurnDensity {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries,
+            span_entry_count,
+            missing_turn_count,
+            turn_density,
         })
     }
 

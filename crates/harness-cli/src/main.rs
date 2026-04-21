@@ -141,6 +141,9 @@ enum CliCommand {
     TranscriptMissingTurnIndexes {
         selector: String,
     },
+    TranscriptTurnDensity {
+        selector: String,
+    },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -362,6 +365,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             serde_json::to_string_pretty(&missing)
                 .expect("serialize transcript missing-turn-indexes")
         }
+        CliCommand::TranscriptTurnDensity { selector } => {
+            let density = engine
+                .turn_density_session_transcript(&selector)
+                .expect("turn-density persisted session transcript");
+            serde_json::to_string_pretty(&density)
+                .expect("serialize transcript turn-density")
+        }
     }
 }
 
@@ -384,8 +394,9 @@ mod tests {
         SessionTranscriptEntryCount, SessionTranscriptFind, SessionTranscriptFirstTurn,
         SessionTranscriptHasEntries, SessionTranscriptHasTurnGaps, SessionTranscriptLastTurn,
         SessionTranscriptMissingTurnIndexes, SessionTranscriptRange, SessionTranscriptTail,
-        SessionTranscriptTurnExists, SessionTranscriptTurnIndexes, SessionTranscriptTurnRange,
-        SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin, TranscriptEntry, TranscriptRecord,
+        SessionTranscriptTurnDensity, SessionTranscriptTurnExists, SessionTranscriptTurnIndexes,
+        SessionTranscriptTurnRange, SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin,
+        TranscriptEntry, TranscriptRecord,
         DEFAULT_TRANSCRIPT_CONTEXT_WINDOW, DEFAULT_TRANSCRIPT_RANGE_COUNT,
         DEFAULT_TRANSCRIPT_TAIL_COUNT,
     };
@@ -6925,6 +6936,308 @@ mod tests {
 
         let err = engine
             .missing_turn_indexes_session_transcript("label:")
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_density_raw_id_contiguous_transcript_reports_full_density_and_leaves_state_untouched(
+    ) {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let before_session = engine.load_session(&id).expect("reload session");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTurnDensity {
+                selector: id.clone(),
+            },
+        );
+        let density: SessionTranscriptTurnDensity =
+            serde_json::from_str(&output).expect("parse transcript-turn-density output");
+
+        assert_eq!(density.selector, id);
+        assert_eq!(density.resolved_session_id.to_string(), density.selector);
+        assert_eq!(density.total_entries, 3);
+        assert_eq!(density.span_entry_count, 3);
+        assert_eq!(density.missing_turn_count, 0);
+        assert_eq!(density.turn_density, 1.0);
+        assert_eq!(density.created_at_ms, before_transcript.created_at_ms);
+        assert_eq!(density.updated_at_ms, before_transcript.updated_at_ms);
+
+        let after_transcript = engine
+            .load_transcript(&density.selector)
+            .expect("reload after turn-density");
+        assert_eq!(after_transcript, before_transcript);
+        let after_session = engine
+            .load_session(&density.selector)
+            .expect("reload session after turn-density");
+        assert_eq!(after_session, before_session);
+
+        let normalized = normalize_timestamps(&output.replace(&density.selector, "<session-id>"));
+        assert_eq!(
+            normalized,
+            readme_output_block("transcript-turn-density <selector>", "json")
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_density_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer first");
+        extend_transcript(&engine, &newer, &["newer follow-up"]);
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTurnDensity {
+                selector: "latest".to_string(),
+            },
+        );
+        let density: SessionTranscriptTurnDensity =
+            serde_json::from_str(&output).expect("parse transcript-turn-density latest output");
+
+        assert_eq!(density.selector, "latest");
+        assert_eq!(density.resolved_session_id.to_string(), newer);
+        assert_eq!(density.total_entries, 2);
+        assert_eq!(density.span_entry_count, 2);
+        assert_eq!(density.missing_turn_count, 0);
+        assert_eq!(density.turn_density, 1.0);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_density_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled first");
+        extend_transcript(&engine, &id, &["labeled follow-up"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for turn-density");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTurnDensity {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let density: SessionTranscriptTurnDensity =
+            serde_json::from_str(&output).expect("parse transcript-turn-density label output");
+
+        assert_eq!(density.selector, "label:runtime-review");
+        assert_eq!(density.resolved_session_id.to_string(), id);
+        assert_eq!(density.total_entries, 2);
+        assert_eq!(density.span_entry_count, 2);
+        assert_eq!(density.missing_turn_count, 0);
+        assert_eq!(density.turn_density, 1.0);
+
+        let reloaded = engine
+            .load_session(&id)
+            .expect("reload after turn-density");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_density_single_entry_transcript_reports_full_density() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "only prompt");
+
+        let density = engine
+            .turn_density_session_transcript(&id)
+            .expect("single-entry transcript should succeed");
+        assert_eq!(density.total_entries, 1);
+        assert_eq!(density.span_entry_count, 1);
+        assert_eq!(density.missing_turn_count, 0);
+        assert_eq!(density.turn_density, 1.0);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_density_empty_transcript_reports_defaults_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        let density = engine
+            .turn_density_session_transcript(&session_id)
+            .expect("empty transcript should succeed");
+        assert_eq!(density.selector, session_id);
+        assert_eq!(density.resolved_session_id.to_string(), density.selector);
+        assert_eq!(density.total_entries, 0);
+        assert_eq!(density.span_entry_count, 0);
+        assert_eq!(density.missing_turn_count, 0);
+        assert_eq!(density.turn_density, 1.0);
+        assert_eq!(density.created_at_ms, empty_transcript.created_at_ms);
+        assert_eq!(density.updated_at_ms, empty_transcript.updated_at_ms);
+
+        let after = engine
+            .load_transcript(&density.selector)
+            .expect("reload empty transcript");
+        assert_eq!(after, empty_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_density_gapped_transcript_reports_density_below_one() {
+        use harness_core::{Prompt, TurnIndex};
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist seed session");
+
+        let gap_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: vec![
+                TranscriptEntry {
+                    turn_index: TurnIndex(1),
+                    prompt: Prompt::new("turn one"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(4),
+                    prompt: Prompt::new("turn four - gaps at 2, 3"),
+                },
+                TranscriptEntry {
+                    turn_index: TurnIndex(7),
+                    prompt: Prompt::new("turn seven - gaps at 5, 6"),
+                },
+            ],
+        };
+        engine
+            .store
+            .save_transcript(&gap_transcript)
+            .expect("persist gap transcript");
+
+        let density = engine
+            .turn_density_session_transcript(&session_id)
+            .expect("gapped transcript should succeed");
+
+        assert_eq!(density.total_entries, 3);
+        assert_eq!(density.span_entry_count, 7);
+        assert_eq!(density.missing_turn_count, 4);
+        assert!(
+            density.turn_density < 1.0,
+            "expected density < 1.0 for gapped transcript, got: {}",
+            density.turn_density
+        );
+        assert_eq!(density.turn_density, 3.0_f64 / 7.0_f64);
+        assert_eq!(density.created_at_ms, gap_transcript.created_at_ms);
+        assert_eq!(density.updated_at_ms, gap_transcript.updated_at_ms);
+
+        let after = engine
+            .load_transcript(&session_id)
+            .expect("reload gap transcript");
+        assert_eq!(after, gap_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_density_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .turn_density_session_transcript("00000000-0000-0000-0000-000000000000")
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .turn_density_session_transcript("label:nonexistent")
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        assert!(engine.load_session(&anchor).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_density_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
+
+        let err = engine
+            .turn_density_session_transcript("label:duplicate")
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_density_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .turn_density_session_transcript("label:")
             .expect_err("empty label should fail");
         assert!(
             err.contains("malformed session selector"),
