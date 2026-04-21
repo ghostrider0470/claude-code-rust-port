@@ -45,8 +45,8 @@ enum CliCommand {
         selector: String,
     },
     SessionCompare {
-        left: String,
-        right: String,
+        left_selector: String,
+        right_selector: String,
     },
     SessionDelete {
         selector: String,
@@ -235,10 +235,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("export persisted session by selector");
             serde_json::to_string_pretty(&export).expect("serialize session export")
         }
-        CliCommand::SessionCompare { left, right } => {
+        CliCommand::SessionCompare {
+            left_selector,
+            right_selector,
+        } => {
             let comparison = engine
-                .compare_sessions(&left, &right)
-                .expect("compare persisted sessions");
+                .compare_sessions(&left_selector, &right_selector)
+                .expect("compare persisted sessions by selector");
             serde_json::to_string_pretty(&comparison).expect("serialize session comparison")
         }
         CliCommand::SessionDelete { selector } => {
@@ -1237,8 +1240,8 @@ mod tests {
         let compare_output = render_command(
             &engine,
             CliCommand::SessionCompare {
-                left: left_id.clone(),
-                right: right_id.clone(),
+                left_selector: left_id.clone(),
+                right_selector: right_id.clone(),
             },
         );
 
@@ -1260,7 +1263,7 @@ mod tests {
 
         assert_eq!(
             normalize_comparison_output(&compare_output, &left_id, &right_id),
-            readme_output_block("session-compare <left-id> <right-id>", "json")
+            readme_output_block("session-compare <left-selector> <right-selector>", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
@@ -1287,8 +1290,8 @@ mod tests {
         let compare_output = render_command(
             &engine,
             CliCommand::SessionCompare {
-                left: "latest".to_string(),
-                right: "latest".to_string(),
+                left_selector: "latest".to_string(),
+                right_selector: "latest".to_string(),
             },
         );
 
@@ -2335,8 +2338,8 @@ mod tests {
         let compare_output = render_command(
             &engine,
             CliCommand::SessionCompare {
-                left: "label:runtime-review".to_string(),
-                right: "latest".to_string(),
+                left_selector: "label:runtime-review".to_string(),
+                right_selector: "latest".to_string(),
             },
         );
         let comparison: SessionComparison =
@@ -12526,6 +12529,153 @@ mod tests {
         assert!(malformed.is_err(), "malformed selector must fail cleanly");
         assert!(
             malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
+            "malformed-selector error must mention malformed selector"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_compare_accepts_label_selector_on_both_sides_and_emits_resolved_ids() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let left_id = bootstrap_session_id(&engine, "review bash");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let right_id = bootstrap_session_id(&engine, "summary please");
+
+        engine
+            .rename_session(&left_id, "left-review")
+            .expect("label left");
+        engine
+            .rename_session(&right_id, "right-review")
+            .expect("label right");
+
+        let compare_output = render_command(
+            &engine,
+            CliCommand::SessionCompare {
+                left_selector: "label:left-review".to_string(),
+                right_selector: "label:right-review".to_string(),
+            },
+        );
+
+        let comparison: SessionComparison =
+            serde_json::from_str(&compare_output).expect("parse compare output");
+        assert_eq!(
+            comparison.left_session_id.to_string(),
+            left_id,
+            "left_session_id must resolve to the label's persisted session"
+        );
+        assert_eq!(
+            comparison.right_session_id.to_string(),
+            right_id,
+            "right_session_id must resolve to the label's persisted session"
+        );
+        assert!(!comparison.differences.same_session);
+
+        // Machine-readable JSON must never echo the typed selector strings.
+        assert!(
+            !compare_output.contains("label:left-review"),
+            "JSON output must not echo the left selector string: {compare_output}"
+        );
+        assert!(
+            !compare_output.contains("label:right-review"),
+            "JSON output must not echo the right selector string: {compare_output}"
+        );
+        assert!(
+            compare_output.contains(&left_id) && compare_output.contains(&right_id),
+            "JSON output must surface both resolved session_ids: {compare_output}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_compare_label_selector_failures_are_distinct_and_clean_on_both_sides() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Seed a single labeled session so the "other side" always resolves
+        // cleanly; this isolates the failure to the side under test.
+        let anchor = bootstrap_session_id(&engine, "anchor");
+        engine
+            .rename_session(&anchor, "anchor")
+            .expect("label anchor");
+
+        // Unknown label on the left side surfaces via compare_sessions and
+        // echoes the typed selector so scripts can correlate the failure.
+        let left_unknown = engine.compare_sessions("label:missing", "label:anchor");
+        assert!(left_unknown.is_err(), "unknown left label must fail cleanly");
+        assert!(
+            left_unknown.unwrap_err().contains("label:missing"),
+            "unknown-label error must echo the typed selector"
+        );
+
+        // Unknown label on the right side must fail identically.
+        let right_unknown = engine.compare_sessions("label:anchor", "label:missing");
+        assert!(
+            right_unknown.is_err(),
+            "unknown right label must fail cleanly"
+        );
+        assert!(
+            right_unknown.unwrap_err().contains("label:missing"),
+            "unknown-label error must echo the typed selector"
+        );
+
+        // Two persisted sessions sharing a label produce an ambiguous resolve
+        // on whichever side references it.
+        let one = bootstrap_session_id(&engine, "alpha");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let two = bootstrap_session_id(&engine, "beta");
+        engine.rename_session(&one, "dup").expect("label one");
+        engine.rename_session(&two, "dup").expect("label two");
+
+        let left_ambiguous = engine.compare_sessions("label:dup", "label:anchor");
+        assert!(
+            left_ambiguous.is_err(),
+            "ambiguous left label must fail cleanly"
+        );
+        assert!(
+            left_ambiguous
+                .unwrap_err()
+                .contains("ambiguous session label"),
+            "ambiguous-label error must mention ambiguity"
+        );
+
+        let right_ambiguous = engine.compare_sessions("label:anchor", "label:dup");
+        assert!(
+            right_ambiguous.is_err(),
+            "ambiguous right label must fail cleanly"
+        );
+        assert!(
+            right_ambiguous
+                .unwrap_err()
+                .contains("ambiguous session label"),
+            "ambiguous-label error must mention ambiguity"
+        );
+
+        // `label:` with no name is malformed on either side.
+        let left_malformed = engine.compare_sessions("label:", "label:anchor");
+        assert!(
+            left_malformed.is_err(),
+            "malformed left selector must fail cleanly"
+        );
+        assert!(
+            left_malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
+            "malformed-selector error must mention malformed selector"
+        );
+
+        let right_malformed = engine.compare_sessions("label:anchor", "label:");
+        assert!(
+            right_malformed.is_err(),
+            "malformed right selector must fail cleanly"
+        );
+        assert!(
+            right_malformed
                 .unwrap_err()
                 .contains("malformed session selector"),
             "malformed-selector error must mention malformed selector"
