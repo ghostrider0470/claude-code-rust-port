@@ -60,7 +60,7 @@ Build a Rust-native Claude Code-style CLI/runtime that Hamza can use as a primar
 - [x] `summary`
 - [x] `route <prompt>`
 - [x] `bootstrap <prompt>`
-- [x] `resume <id> <prompt>` (and `resume latest <prompt>`) — append a new turn to an existing persisted session; output confirms the targeted session id, the appended turn index, and the refreshed `updated_at_ms` activity metadata
+- [x] `resume <selector> <prompt>` — append a new turn to an existing persisted session; `<selector>` accepts raw `session_id`, `latest`, or `label:<name>` routed through the shared selector-resolution path; the resumed turn is appended to the same persisted session file, `updated_at_ms` is refreshed, and the sibling transcript is rewritten so `turn_index` ordering is extended in place; output is machine-readable JSON that identifies the resolved persisted `session_id` via `resumed_session_id` rather than the typed selector string and exposes the appended turn index; selector failure semantics stay deterministic (unknown id/label → `SessionNotFound`, duplicate labels → `AmbiguousLabel`, empty `label:` → `MalformedSelector`)
 - [x] `tools`
 - [x] `commands`
 - [x] `session-show <selector>` — inspect the persisted state of a single session; `<selector>` accepts raw `session_id`, `latest`, or `label:<name>` routed through the shared selector-resolution path; output is machine-readable JSON that surfaces the actual resolved `session_id` rather than the typed selector string; selector failure semantics stay deterministic (unknown id/label → `SessionNotFound`, duplicate labels → `AmbiguousLabel`, empty `label:` → `MalformedSelector`)

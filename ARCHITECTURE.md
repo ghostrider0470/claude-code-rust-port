@@ -225,7 +225,7 @@ User-facing CLI:
 - `summary`
 - `route <prompt>`
 - `bootstrap <prompt>`
-- `resume <id> <prompt>` and `resume latest <prompt>` (append a new turn to an existing persisted session; output confirms the targeted session id and appended turn index)
+- `resume <selector> <prompt>` (accepts raw `session_id`, `latest`, or `label:<name>` — routed through the shared selector-resolution path; appends a new turn to the resolved persisted session, refreshes `updated_at_ms` so subsequent `latest` lookups point at the most recently active session, and rewrites the sibling transcript so `turn_index` ordering is extended in place; machine-readable JSON output identifies the resolved persisted `session_id` via `resumed_session_id` rather than the typed selector string and exposes the appended turn index; selector failures stay deterministic — unknown id/label → `SessionNotFound`, duplicate labels → `AmbiguousLabel`, empty `label:` → `MalformedSelector`)
 - `tools list`
 - `commands list`
 - `sessions` with optional `--limit <n>` (inspect-only listing that preserves the existing newest-first ordering — `updated_at_ms` → `created_at_ms` → `session_id` → `persisted_path`; omitting `--limit` returns every persisted session unchanged; `--limit <n>` returns at most the newest `n` rows from that same ordering, `--limit 0` returns an empty array cleanly, a `--limit` larger than the store returns every available session cleanly, and the per-row JSON shape stays the same — the limited form is a slice of the existing array, not a new wrapper object; does not mutate any persisted session, transcript entry, label, pinned flag, id, path, or ordering metadata)

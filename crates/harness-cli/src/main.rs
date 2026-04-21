@@ -23,8 +23,11 @@ enum CliCommand {
     Bootstrap {
         prompt: String,
     },
+    /// Resume a persisted session by selector (raw id, latest, or label:<name>)
+    #[command(about = "Append a new turn to a persisted session using a selector (id, latest, or label:<name>) <PROMPT>")]
     Resume {
-        id: String,
+        #[arg(value_name = "SELECTOR")]
+        selector: String,
         prompt: String,
     },
     Tools,
@@ -201,10 +204,10 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("bootstrap runtime turn");
             serde_json::to_string_pretty(&report).expect("serialize bootstrap report")
         }
-        CliCommand::Resume { id, prompt } => {
+        CliCommand::Resume { selector, prompt } => {
             let report = engine
-                .resume(&id, Prompt::new(prompt))
-                .expect("resume persisted session");
+                .resume(&selector, Prompt::new(prompt))
+                .expect("resume persisted session by selector");
             serde_json::to_string_pretty(&report).expect("serialize resume report")
         }
         CliCommand::Tools => {
@@ -915,6 +918,43 @@ mod tests {
     }
 
     #[test]
+    fn resume_help_mentions_selector_usage() {
+        use clap::{CommandFactory, FromArgMatches};
+
+        let command = Cli::command();
+        let matches = command
+            .clone()
+            .try_get_matches_from(["harness", "resume", "--help"])
+            .expect_err("--help should short-circuit with a displayable clap error");
+        let rendered = matches.to_string();
+        assert!(
+            rendered.contains("resume <SELECTOR> <PROMPT>"),
+            "help output must advertise selector usage: {rendered}"
+        );
+        assert!(
+            rendered.contains("selector (id, latest, or label:<name>)"),
+            "help output must describe supported selector forms: {rendered}"
+        );
+
+        let parsed = Cli::from_arg_matches(
+            &command
+                .try_get_matches_from([
+                    "harness",
+                    "resume",
+                    "label:runtime-review",
+                    "review summary",
+                ])
+                .expect("selector-form resume invocation should parse"),
+        )
+        .expect("selector-form resume invocation should materialize a CLI command");
+        assert!(matches!(
+            parsed.command,
+            CliCommand::Resume { selector, prompt }
+                if selector == "label:runtime-review" && prompt == "review summary"
+        ));
+    }
+
+    #[test]
     fn session_unlabel_help_mentions_selector_usage() {
         use clap::{CommandFactory, FromArgMatches};
 
@@ -1044,7 +1084,7 @@ mod tests {
         let resume_output = render_command(
             &engine,
             CliCommand::Resume {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 prompt: "review summary".to_string(),
             },
         );
@@ -1064,7 +1104,7 @@ mod tests {
 
         assert_eq!(
             normalize_bootstrap_example(&resume_output, &session_id, &root),
-            readme_output_block("resume <id> \"review summary\"", "json")
+            readme_output_block("resume <selector> \"review summary\"", "json")
         );
 
         let reloaded_output = render_command(
@@ -4466,7 +4506,7 @@ mod tests {
             render_command(
                 engine,
                 CliCommand::Resume {
-                    id: id.to_string(),
+                    selector: id.to_string(),
                     prompt: (*prompt).to_string(),
                 },
             );
