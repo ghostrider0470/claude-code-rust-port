@@ -9,8 +9,8 @@ use harness_session::{
     SessionTranscriptContext, SessionTranscriptEntryCount, SessionTranscriptFind,
     SessionTranscriptFirstTurn, SessionTranscriptHasEntries, SessionTranscriptLastTurn,
     SessionTranscriptRange, SessionTranscriptTail, SessionTranscriptTurnExists,
-    SessionTranscriptTurnIndexes, SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin,
-    TranscriptRecord, TranscriptStore,
+    SessionTranscriptTurnIndexes, SessionTranscriptTurnRange, SessionTranscriptTurnShow,
+    SessionUnlabel, SessionUnpin, TranscriptRecord, TranscriptStore,
 };
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
@@ -608,6 +608,15 @@ impl RuntimeEngine {
     ) -> Result<SessionTranscriptTurnIndexes, String> {
         self.store
             .turn_indexes_transcript(selector)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn turn_range_session_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptTurnRange, String> {
+        self.store
+            .turn_range_transcript(selector)
             .map_err(|err| err.to_string())
     }
 

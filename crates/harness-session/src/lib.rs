@@ -524,6 +524,17 @@ pub struct SessionTranscriptTurnIndexes {
     pub turn_indexes: Vec<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptTurnRange {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub first_turn_index: Option<usize>,
+    pub last_turn_index: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -964,6 +975,42 @@ impl SessionStore {
             updated_at_ms: transcript.updated_at_ms,
             total_entries,
             turn_indexes,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// deterministic machine-readable summary describing the lowest and highest
+    /// `turn_index` values present in the resolved persisted transcript,
+    /// without returning transcript entries. The persisted transcript is not
+    /// mutated. Empty transcripts succeed cleanly with `total_entries: 0`,
+    /// `first_turn_index: null`, and `last_turn_index: null`. Preserves
+    /// existing selector failure semantics unchanged (`SessionNotFound` /
+    /// `AmbiguousLabel` / `MalformedSelector`).
+    pub fn turn_range_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptTurnRange, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total_entries = transcript.entries.len();
+        let first_turn_index = transcript
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .min();
+        let last_turn_index = transcript
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .max();
+        Ok(SessionTranscriptTurnRange {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries,
+            first_turn_index,
+            last_turn_index,
         })
     }
 
@@ -3844,6 +3891,137 @@ mod tests {
         // "unknown label".
         for malformed in ["label:", "label:   "] {
             match store.check_selector(malformed) {
+                Err(RuntimeError::MalformedSelector(_)) => {}
+                other => panic!("expected MalformedSelector for {malformed:?}, got {other:?}"),
+            }
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn turn_range_transcript_resolves_raw_id_latest_and_label_without_mutating_state() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let older = seed_session(&store, 1_700_000_000_100, None);
+        let newer = seed_session(&store, 1_700_000_000_500, Some("runtime-review"));
+        let newer_id = newer.session_id.to_string();
+        let mut newer_transcript = store
+            .load_transcript(&newer_id)
+            .expect("load seeded transcript");
+        newer_transcript.entries.push(TranscriptEntry {
+            turn_index: TurnIndex(1),
+            prompt: Prompt::new("second prompt"),
+        });
+        newer_transcript.entries.push(TranscriptEntry {
+            turn_index: TurnIndex(2),
+            prompt: Prompt::new("third prompt"),
+        });
+        store
+            .save_transcript(&newer_transcript)
+            .expect("persist extended transcript");
+
+        let raw_id = newer.session_id.to_string();
+        let by_id = store
+            .turn_range_transcript(&raw_id)
+            .expect("inspect turn range by raw id");
+        assert_eq!(by_id.selector, raw_id);
+        assert_eq!(by_id.resolved_session_id, newer.session_id);
+        assert_eq!(by_id.total_entries, 3);
+        assert_eq!(by_id.first_turn_index, Some(0));
+        assert_eq!(by_id.last_turn_index, Some(2));
+        assert_eq!(by_id.created_at_ms, newer_transcript.created_at_ms);
+        assert_eq!(by_id.updated_at_ms, newer_transcript.updated_at_ms);
+
+        let by_latest = store
+            .turn_range_transcript("latest")
+            .expect("inspect turn range by latest");
+        assert_eq!(by_latest.selector, "latest");
+        assert_eq!(by_latest.resolved_session_id, newer.session_id);
+        assert_eq!(by_latest.first_turn_index, Some(0));
+        assert_eq!(by_latest.last_turn_index, Some(2));
+
+        let by_label = store
+            .turn_range_transcript("label:runtime-review")
+            .expect("inspect turn range by label");
+        assert_eq!(by_label.selector, "label:runtime-review");
+        assert_eq!(by_label.resolved_session_id, newer.session_id);
+        assert_eq!(by_label.first_turn_index, Some(0));
+        assert_eq!(by_label.last_turn_index, Some(2));
+
+        let older_reloaded = store
+            .load(&older.session_id.to_string())
+            .expect("reload older session");
+        assert_eq!(older_reloaded, older);
+        let newer_reloaded = store.load(&newer_id).expect("reload newer session");
+        assert_eq!(newer_reloaded, newer);
+        let transcript_reloaded = store
+            .load_transcript(&newer_id)
+            .expect("reload newer transcript");
+        assert_eq!(transcript_reloaded, newer_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp session test directory");
+    }
+
+    #[test]
+    fn turn_range_transcript_handles_empty_transcripts_and_preserves_selector_failures() {
+        let root = temp_session_root();
+        let store = SessionStore::new(&root);
+
+        let mut empty_session = SessionState::default();
+        empty_session.messages.clear();
+        let empty_id = empty_session.session_id.to_string();
+        store.save(&empty_session).expect("save empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: empty_session.session_id.clone(),
+            created_at_ms: empty_session.created_at_ms,
+            updated_at_ms: empty_session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        store
+            .save_transcript(&empty_transcript)
+            .expect("save empty transcript");
+
+        let empty = store
+            .turn_range_transcript(&empty_id)
+            .expect("empty transcript should succeed");
+        assert_eq!(empty.selector, empty_id);
+        assert_eq!(empty.resolved_session_id, empty_session.session_id);
+        assert_eq!(empty.total_entries, 0);
+        assert_eq!(empty.first_turn_index, None);
+        assert_eq!(empty.last_turn_index, None);
+        assert_eq!(empty.created_at_ms, empty_transcript.created_at_ms);
+        assert_eq!(empty.updated_at_ms, empty_transcript.updated_at_ms);
+
+        let _first = seed_session(&store, 1_700_000_000_100, Some("dup"));
+        let _second = seed_session(&store, 1_700_000_000_200, Some("dup"));
+
+        let missing = "00000000-0000-0000-0000-000000000000";
+        match store.turn_range_transcript(missing) {
+            Err(RuntimeError::SessionNotFound(reported)) => assert_eq!(reported, missing),
+            other => panic!("expected SessionNotFound for unknown id, got {other:?}"),
+        }
+
+        match store.turn_range_transcript("label:missing") {
+            Err(RuntimeError::SessionNotFound(reported)) => {
+                assert_eq!(reported, "label:missing");
+            }
+            other => panic!("expected SessionNotFound for unknown label, got {other:?}"),
+        }
+
+        match store.turn_range_transcript("label:dup") {
+            Err(RuntimeError::AmbiguousLabel(message)) => {
+                assert!(
+                    message.contains("\"dup\""),
+                    "message should quote label: {message}"
+                );
+            }
+            other => panic!("expected AmbiguousLabel, got {other:?}"),
+        }
+
+        for malformed in ["label:", "label:   "] {
+            match store.turn_range_transcript(malformed) {
                 Err(RuntimeError::MalformedSelector(_)) => {}
                 other => panic!("expected MalformedSelector for {malformed:?}, got {other:?}"),
             }
