@@ -872,6 +872,27 @@ cargo run -q -p harness-cli -- transcript-turn-density label:runtime-review
 }
 ```
 
+### `transcript-gap-ranges <selector>`
+
+Inspect the contiguous runs of missing integer `turn_index` values inside the persisted turn span of a single persisted session transcript, without returning any transcript entry payloads. Useful as the inspect-only continuity gap-run probe for scripts that already know the transcript has gaps (via `transcript-has-turn-gaps`) and want to describe those gaps as ranges — for backfill planners, repair scripts, or triage dashboards — without the fully-expanded per-index list returned by `transcript-missing-turn-indexes`. Accepts the same selector forms every other single-session command accepts — a raw `session_id`, `latest`, or `label:<name>` — routed through the shared selector-resolution path so behavior is identical to `session-show`, `transcript-show`, `transcript-tail`, `transcript-find`, `transcript-range`, `transcript-turn-show`, `transcript-context`, `transcript-last-turn`, `transcript-first-turn`, `transcript-entry-count`, `transcript-has-entries`, `transcript-turn-exists`, `transcript-turn-indexes`, `transcript-turn-index-range`, `transcript-has-turn-gaps`, `transcript-missing-turn-indexes`, `transcript-turn-density`, etc. The inspection is scoped to the resolved session's persisted transcript only. Output uses a deterministic shape: `{ selector, resolved_session_id, created_at_ms, updated_at_ms, total_entries, gap_ranges }`, where `selector` echoes the raw input, `resolved_session_id` is the persisted id the selector actually maps to, `total_entries` equals the persisted transcript length, and `gap_ranges` is an ascending array of contiguous missing-turn runs between the smallest and largest present `turn_index` values. Each range carries `{ start_turn_index, end_turn_index, missing_count }` with inclusive bounds; single missing turns collapse to `start_turn_index == end_turn_index` and `missing_count == 1`; adjacent missing turns collapse into one range and disjoint gaps produce multiple ascending ranges. Empty transcripts, single-entry transcripts, and contiguous transcripts succeed cleanly with `gap_ranges: []`. Selector failure semantics are unchanged: unknown ids and unknown labels surface as `session not found`, duplicate labels surface as `ambiguous label`, and `label:` with no name surfaces as `malformed selector`. No persisted session state, transcript entry, label, pinned flag, id, path, or ordering metadata is mutated.
+
+```bash
+cargo run -q -p harness-cli -- transcript-gap-ranges <session-id>
+cargo run -q -p harness-cli -- transcript-gap-ranges latest
+cargo run -q -p harness-cli -- transcript-gap-ranges label:runtime-review
+```
+
+```json
+{
+  "selector": "<session-id>",
+  "resolved_session_id": "<session-id>",
+  "created_at_ms": <created-at-ms>,
+  "updated_at_ms": <updated-at-ms>,
+  "total_entries": 3,
+  "gap_ranges": []
+}
+```
+
 ### `session-export <id>`
 
 Export one persisted session as a single machine-readable JSON bundle that packages the session state and its transcript together. The output uses a deterministic shape: `{ exported_session_id, session, transcript }`, where `session` is the same structure printed by `session-show` and `transcript` is the same structure printed by `transcript-show`. The `exported_session_id` confirms which session was exported and always equals the `session_id` inside both nested records. Turn ordering in `transcript.entries` is preserved in `turn_index` order so the bundle is safe to attach to bug reports or archive outside the repo-local `.sessions/` layout.
