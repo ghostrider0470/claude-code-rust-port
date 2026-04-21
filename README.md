@@ -1400,6 +1400,12 @@ cargo run -q -p harness-cli -- session-pins
 ]
 ```
 
+Pass `--limit <n>` to cap the listing to at most the newest `n` pinned persisted sessions in the existing newest-first ordering. The per-row JSON shape is preserved — `--limit` only truncates the array, it does not wrap the output. Pinned-session filtering is preserved too — unpinned sessions stay omitted and duplicate labels on pinned sessions remain visible as separate rows under limiting. `--limit 0` returns an empty array cleanly, a `--limit` larger than the pinned subset returns every pinned session, and omitting `--limit` preserves the unlimited listing above exactly.
+
+```bash
+cargo run -q -p harness-cli -- session-pins --limit 1
+```
+
 ### `session-pins <empty-store>`
 
 If no persisted session is pinned, `session-pins` returns an empty JSON array instead of erroring, so scripts can treat "no pins" and "none yet" identically.
