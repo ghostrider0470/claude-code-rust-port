@@ -67,11 +67,17 @@ enum CliCommand {
         selector: String,
         label: String,
     },
+    /// Unlabel a persisted session by selector (raw id, latest, or label:<name>)
+    #[command(about = "Remove the persisted label from a session using a selector (id, latest, or label:<name>)" )]
     SessionUnlabel {
-        id: String,
+        #[arg(value_name = "SELECTOR")]
+        selector: String,
     },
+    /// Retag a persisted session by selector (raw id, latest, or label:<name>)
+    #[command(about = "Replace the persisted label on a session using a selector (id, latest, or label:<name>) <LABEL>" )]
     SessionRetag {
-        id: String,
+        #[arg(value_name = "SELECTOR")]
+        selector: String,
         label: String,
     },
     SessionLabels {
@@ -277,16 +283,16 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("rename persisted session by selector");
             serde_json::to_string_pretty(&renamed).expect("serialize session rename")
         }
-        CliCommand::SessionUnlabel { id } => {
+        CliCommand::SessionUnlabel { selector } => {
             let unlabeled = engine
-                .unlabel_session(&id)
-                .expect("unlabel persisted session");
+                .unlabel_session(&selector)
+                .expect("unlabel persisted session by selector");
             serde_json::to_string_pretty(&unlabeled).expect("serialize session unlabel")
         }
-        CliCommand::SessionRetag { id, label } => {
+        CliCommand::SessionRetag { selector, label } => {
             let retagged = engine
-                .retag_session(&id, &label)
-                .expect("retag persisted session");
+                .retag_session(&selector, &label)
+                .expect("retag persisted session by selector");
             serde_json::to_string_pretty(&retagged).expect("serialize session retag")
         }
         CliCommand::SessionLabels { limit } => {
@@ -906,6 +912,74 @@ mod tests {
             rendered.contains("--limit") || rendered.contains("not-a-number"),
             "expected parse error to mention the invalid --limit value, got: {rendered}"
         );
+    }
+
+    #[test]
+    fn session_unlabel_help_mentions_selector_usage() {
+        use clap::{CommandFactory, FromArgMatches};
+
+        let command = Cli::command();
+        let matches = command
+            .clone()
+            .try_get_matches_from(["harness", "session-unlabel", "--help"])
+            .expect_err("--help should short-circuit with a displayable clap error");
+        let rendered = matches.to_string();
+        assert!(
+            rendered.contains("session-unlabel <SELECTOR>"),
+            "help output must advertise selector usage: {rendered}"
+        );
+        assert!(
+            rendered.contains("selector (id, latest, or label:<name>)"),
+            "help output must describe supported selector forms: {rendered}"
+        );
+
+        let parsed = Cli::from_arg_matches(
+            &command
+                .try_get_matches_from(["harness", "session-unlabel", "latest"])
+                .expect("selector-form invocation should parse"),
+        )
+        .expect("selector-form invocation should materialize a CLI command");
+        assert!(matches!(
+            parsed.command,
+            CliCommand::SessionUnlabel { selector } if selector == "latest"
+        ));
+    }
+
+    #[test]
+    fn session_retag_help_mentions_selector_usage() {
+        use clap::{CommandFactory, FromArgMatches};
+
+        let command = Cli::command();
+        let matches = command
+            .clone()
+            .try_get_matches_from(["harness", "session-retag", "--help"])
+            .expect_err("--help should short-circuit with a displayable clap error");
+        let rendered = matches.to_string();
+        assert!(
+            rendered.contains("session-retag <SELECTOR> <LABEL>"),
+            "help output must advertise selector usage: {rendered}"
+        );
+        assert!(
+            rendered.contains("selector (id, latest, or label:<name>)"),
+            "help output must describe supported selector forms: {rendered}"
+        );
+
+        let parsed = Cli::from_arg_matches(
+            &command
+                .try_get_matches_from([
+                    "harness",
+                    "session-retag",
+                    "label:runtime-review",
+                    "release-candidate",
+                ])
+                .expect("selector-form retag invocation should parse"),
+        )
+        .expect("selector-form retag invocation should materialize a CLI command");
+        assert!(matches!(
+            parsed.command,
+            CliCommand::SessionRetag { selector, label }
+                if selector == "label:runtime-review" && label == "release-candidate"
+        ));
     }
 
     #[test]
@@ -3287,7 +3361,7 @@ mod tests {
         let unlabel_output = render_command(
             &engine,
             CliCommand::SessionUnlabel {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
 
@@ -3326,7 +3400,7 @@ mod tests {
 
         assert_eq!(
             normalize_session_output(&unlabel_output, &session_id),
-            readme_output_block("session-unlabel <id>", "json")
+            readme_output_block("session-unlabel <selector>", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
@@ -3360,7 +3434,7 @@ mod tests {
         let latest_output = render_command(
             &engine,
             CliCommand::SessionUnlabel {
-                id: "latest".to_string(),
+                selector: "latest".to_string(),
             },
         );
         let result: SessionUnlabel =
@@ -3411,7 +3485,7 @@ mod tests {
         let label_output = render_command(
             &engine,
             CliCommand::SessionUnlabel {
-                id: "label:runtime-review".to_string(),
+                selector: "label:runtime-review".to_string(),
             },
         );
         let result: SessionUnlabel =
@@ -3542,7 +3616,7 @@ mod tests {
         let retag_output = render_command(
             &engine,
             CliCommand::SessionRetag {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "release-candidate".to_string(),
             },
         );
@@ -3577,7 +3651,7 @@ mod tests {
 
         assert_eq!(
             normalize_session_output(&retag_output, &session_id),
-            readme_output_block("session-retag <id> <label>", "json")
+            readme_output_block("session-retag <selector> <label>", "json")
         );
 
         // session-labels reflects the new label and no longer surfaces the old one.
@@ -3620,7 +3694,7 @@ mod tests {
         let latest_output = render_command(
             &engine,
             CliCommand::SessionRetag {
-                id: "latest".to_string(),
+                selector: "latest".to_string(),
                 label: "release-candidate".to_string(),
             },
         );
@@ -3676,7 +3750,7 @@ mod tests {
         let label_output = render_command(
             &engine,
             CliCommand::SessionRetag {
-                id: "label:runtime-review".to_string(),
+                selector: "label:runtime-review".to_string(),
                 label: "release-candidate".to_string(),
             },
         );
