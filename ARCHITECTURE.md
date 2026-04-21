@@ -228,7 +228,7 @@ User-facing CLI:
 - `resume <id> <prompt>` and `resume latest <prompt>` (append a new turn to an existing persisted session; output confirms the targeted session id and appended turn index)
 - `tools list`
 - `commands list`
-- `sessions` (newest-first)
+- `sessions` with optional `--limit <n>` (inspect-only listing that preserves the existing newest-first ordering — `updated_at_ms` → `created_at_ms` → `session_id` → `persisted_path`; omitting `--limit` returns every persisted session unchanged; `--limit <n>` returns at most the newest `n` rows from that same ordering, `--limit 0` returns an empty array cleanly, a `--limit` larger than the store returns every available session cleanly, and the per-row JSON shape stays the same — the limited form is a slice of the existing array, not a new wrapper object; does not mutate any persisted session, transcript entry, label, pinned flag, id, path, or ordering metadata)
 - `session show <id>`
 - `session show latest`
 - `transcript show <id>` and `transcript show latest` (machine-readable JSON transcript inspection that restates the owning session id and preserves turn ordering)

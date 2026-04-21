@@ -29,7 +29,10 @@ enum CliCommand {
     },
     Tools,
     Commands,
-    Sessions,
+    Sessions {
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     SessionShow {
         id: String,
     },
@@ -186,8 +189,11 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
         CliCommand::Commands => {
             serde_json::to_string_pretty(engine.commands.list()).expect("serialize command list")
         }
-        CliCommand::Sessions => {
-            let sessions = engine.list_sessions().expect("list persisted sessions");
+        CliCommand::Sessions { limit } => {
+            let mut sessions = engine.list_sessions().expect("list persisted sessions");
+            if let Some(limit) = limit {
+                sessions.truncate(limit);
+            }
             serde_json::to_string_pretty(&sessions).expect("serialize session list")
         }
         CliCommand::SessionShow { id } => {
@@ -669,7 +675,7 @@ mod tests {
             .expect("session id in bootstrap output")
             .to_string();
 
-        let sessions_output = render_command(&engine, CliCommand::Sessions);
+        let sessions_output = render_command(&engine, CliCommand::Sessions { limit: None });
 
         assert_eq!(
             normalize_bootstrap_example(&sessions_output, &session_id, &root),
@@ -677,6 +683,171 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    fn sessions_output_ids(engine: &RuntimeEngine, limit: Option<usize>) -> Vec<String> {
+        let output = render_command(engine, CliCommand::Sessions { limit });
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("parse sessions output");
+        parsed
+            .as_array()
+            .expect("sessions output is a JSON array")
+            .iter()
+            .map(|entry| {
+                entry["session_id"]
+                    .as_str()
+                    .expect("session_id in sessions output")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sessions_with_limit_zero_returns_empty_array_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _ = bootstrap_session_id(&engine, "only one");
+
+        let output = render_command(&engine, CliCommand::Sessions { limit: Some(0) });
+        assert_eq!(output, "[]");
+
+        // The store itself is untouched — default listing still returns the session.
+        let unlimited = sessions_output_ids(&engine, None);
+        assert_eq!(unlimited.len(), 1);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn sessions_with_limit_one_returns_only_newest_preserving_ordering() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer");
+
+        let limited = sessions_output_ids(&engine, Some(1));
+        assert_eq!(limited, vec![newer.clone()]);
+
+        // Unlimited listing still returns both in newest-first order.
+        let unlimited = sessions_output_ids(&engine, None);
+        assert_eq!(unlimited.first().map(String::as_str), Some(newer.as_str()));
+        assert_eq!(unlimited.len(), 2);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn sessions_with_limit_smaller_than_store_returns_prefix_of_default_ordering() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "second");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let c = bootstrap_session_id(&engine, "third");
+
+        let unlimited = sessions_output_ids(&engine, None);
+        assert_eq!(unlimited, vec![c.clone(), b.clone(), a.clone()]);
+
+        let limited = sessions_output_ids(&engine, Some(2));
+        assert_eq!(limited, unlimited[..2].to_vec());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn sessions_with_limit_exceeding_store_returns_all_available_sessions() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "second");
+
+        let unlimited = sessions_output_ids(&engine, None);
+        assert_eq!(unlimited, vec![b.clone(), a.clone()]);
+
+        let limited = sessions_output_ids(&engine, Some(99));
+        assert_eq!(limited, unlimited);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn sessions_omitted_limit_preserves_current_unlimited_behavior_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _ = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _ = bootstrap_session_id(&engine, "second");
+
+        let baseline_output = render_command(&engine, CliCommand::Sessions { limit: None });
+        let explicit_large =
+            render_command(&engine, CliCommand::Sessions { limit: Some(usize::MAX) });
+        assert_eq!(baseline_output, explicit_large);
+
+        // Per-row JSON shape is the bare array — no wrapper object.
+        assert!(baseline_output.trim_start().starts_with('['));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn sessions_limit_does_not_mutate_persisted_store() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "second");
+
+        let before_a = engine.load_session(&a).expect("load a before");
+        let before_b = engine.load_session(&b).expect("load b before");
+        let before_ta = engine.load_transcript(&a).expect("transcript a before");
+        let before_tb = engine.load_transcript(&b).expect("transcript b before");
+
+        let _ = render_command(&engine, CliCommand::Sessions { limit: Some(1) });
+        let _ = render_command(&engine, CliCommand::Sessions { limit: Some(0) });
+        let _ = render_command(&engine, CliCommand::Sessions { limit: Some(10) });
+
+        assert_eq!(engine.load_session(&a).expect("load a after"), before_a);
+        assert_eq!(engine.load_session(&b).expect("load b after"), before_b);
+        assert_eq!(
+            engine.load_transcript(&a).expect("transcript a after"),
+            before_ta
+        );
+        assert_eq!(
+            engine.load_transcript(&b).expect("transcript b after"),
+            before_tb
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn sessions_invalid_limit_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from(["harness", "sessions", "--limit", "-1"])
+            .expect_err("negative --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from(["harness", "sessions", "--limit", "not-a-number"])
+            .expect_err("non-numeric --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
     }
 
     #[test]
