@@ -493,11 +493,12 @@ cargo run -q -p harness-cli -- session-show label:runtime-review
 
 Inspect the persisted transcript for a single session. `<selector>` accepts any of the three forms every other single-session command accepts — a raw `session_id`, the literal `latest`, or `label:<name>` — routed through the shared selector-resolution path. The output restates the owning `session_id` and the session's recency metadata so it is self-describing, and lists turns in append order. Selector failure semantics are unchanged: unknown ids and unknown labels surface as `session not found`, duplicate labels surface as `ambiguous label`, and `label:` with no name surfaces as `malformed selector`.
 
-Pass `--limit <n>` to cap the `entries` array to at most the first `n` entries in the existing canonical append order. The outer JSON shape is preserved — `--limit` only truncates `entries`; no wrapper object is introduced. `--limit 0` returns `entries: []` cleanly, a `--limit` larger than the persisted transcript length returns every entry cleanly, and omitting `--limit` preserves the unlimited behavior above exactly. Negative and non-numeric `--limit` values fail cleanly at parse time. No persisted session state, transcript entry, label, pinned flag, id, path, or ordering metadata is mutated.
+Pass `--limit <n>` to cap the `entries` array to at most the first `n` entries in the existing canonical append order. Pass `--tail <n>` instead to inspect only the newest `n` entries while preserving canonical append order within the returned slice. The outer JSON shape is preserved for both flags — they only reshape `entries`; no wrapper object is introduced. `--limit 0` / `--tail 0` return `entries: []` cleanly, a `--limit` / `--tail` larger than the persisted transcript length returns every entry cleanly, and omitting both preserves the unlimited behavior above exactly. `--limit` and `--tail` are mutually exclusive at parse time so output-shaping semantics stay deterministic. Negative and non-numeric `--limit` / `--tail` values fail cleanly at parse time. No persisted session state, transcript entry, label, pinned flag, id, path, or ordering metadata is mutated.
 
 ```bash
 cargo run -q -p harness-cli -- transcript-show <session-id>
 cargo run -q -p harness-cli -- transcript-show <session-id> --limit 1
+cargo run -q -p harness-cli -- transcript-show <session-id> --tail 1
 ```
 
 ```json
