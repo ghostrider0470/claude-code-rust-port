@@ -595,6 +595,16 @@ pub struct SessionTranscriptGapCount {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptMissingTurnCount {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub missing_turn_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTranscriptLargestGapRun {
     pub start_turn_index: usize,
     pub end_turn_index: usize,
@@ -1339,6 +1349,42 @@ impl SessionStore {
             updated_at_ms: transcript.updated_at_ms,
             total_entries,
             gap_count,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// deterministic machine-readable count of individual missing integer
+    /// `turn_index` values between the smallest and largest present
+    /// `turn_index` values in the resolved persisted transcript, without
+    /// returning transcript entries or the missing indexes themselves. Counts
+    /// every missing integer position (not contiguous runs). Empty transcripts,
+    /// single-entry transcripts, and contiguous transcripts succeed cleanly
+    /// with `missing_turn_count: 0`. The persisted transcript is not mutated.
+    /// Preserves existing selector failure semantics unchanged
+    /// (`SessionNotFound` / `AmbiguousLabel` / `MalformedSelector`).
+    pub fn missing_turn_count_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptMissingTurnCount, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total_entries = transcript.entries.len();
+        let present: std::collections::HashSet<usize> = transcript
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .collect();
+        let missing_turn_count = match (present.iter().min(), present.iter().max()) {
+            (Some(&min), Some(&max)) => (min..=max).filter(|idx| !present.contains(idx)).count(),
+            _ => 0,
+        };
+        Ok(SessionTranscriptMissingTurnCount {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries,
+            missing_turn_count,
         })
     }
 
