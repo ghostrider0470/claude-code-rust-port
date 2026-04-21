@@ -293,9 +293,9 @@ cargo run -q -p harness-cli -- bootstrap "review bash"
 }
 ```
 
-### `resume <id> "review summary"`
+### `resume <selector> "review summary"`
 
-Append a new turn to an existing persisted session. Pass either an explicit session id or the literal `latest` target. The resumed turn is appended to the same session file rather than starting a new session, and `updated_at_ms` is refreshed so subsequent `latest` lookups point at the most recently active session.
+Append a new turn to an existing persisted session. `<selector>` accepts raw `session_id`, `latest`, or `label:<name>` — all three forms are routed through the shared selector-resolution path so `resume` targets the same persisted session regardless of which form was typed. The resumed turn is appended to the same session file rather than starting a new session, and `updated_at_ms` is refreshed so subsequent `latest` lookups point at the most recently active session. Machine-readable JSON output continues to identify the actual resolved `session_id` via `resumed_session_id` rather than echoing the selector string, so downstream tooling can rely on the resolved id even when the user typed `label:<name>` or `latest`. Selector failures are deterministic: unknown id/label surfaces as `SessionNotFound`, duplicate labels as `AmbiguousLabel`, and an empty `label:` as `MalformedSelector`.
 
 ```bash
 cargo run -q -p harness-cli -- resume <session-id> "review summary"
@@ -402,10 +402,11 @@ cargo run -q -p harness-cli -- resume <session-id> "review summary"
 }
 ```
 
-`latest` is supported as the resume target too:
+`latest` and `label:<name>` are supported as resume targets too:
 
 ```bash
 cargo run -q -p harness-cli -- resume latest "review summary"
+cargo run -q -p harness-cli -- resume label:runtime-review "review summary"
 ```
 
 ### `sessions`
@@ -1644,7 +1645,7 @@ Current protected Rust surface:
 - README-backed CLI output regression coverage for `summary`, `route <prompt>`, `tools`, `commands`, and `sessions`
 - README-backed persisted-session example coverage for `bootstrap <prompt>`, `session-show <selector>` (raw id, `latest`, and `label:<name>`), with generated session identifiers normalized to `<session-id>` and generated recency metadata normalized to `<created-at-ms>` / `<updated-at-ms>` in test assertions
 - `harness-runtime` session resume behavior: an appended turn targets the original session id, bumps `updated_at_ms`, and emits a `SessionResumed` event; `resume latest` targets the most recently active session
-- README-backed CLI coverage for `resume <id> "review summary"` confirming the resumed turn is appended to the existing persisted session and the output exposes the targeted session id plus the appended turn index
+- README-backed CLI coverage for `resume <selector> "review summary"` (raw id, `latest`, and `label:<name>`) confirming the resumed turn is appended to the existing persisted session and the output exposes the resolved `resumed_session_id` plus the appended turn index
 - `harness-session` transcript persistence: save/load round-trip preserves `turn_index` ordering, transcript files are excluded from session listings, and `latest_transcript` follows the most recently updated session
 - `harness-runtime` transcript persistence: `bootstrap` writes a transcript file alongside the session, emits a `TranscriptPersisted` event, and `resume` rewrites the transcript so `turn_index` ordering is extended in place
 - README-backed CLI coverage for `transcript-show <selector>` (raw id, `latest`, and `label:<name>`) confirming the output restates the owning `session_id` and preserves turn ordering, plus selector failure coverage for unknown / ambiguous / malformed label selectors on both `session-show` and `transcript-show`
@@ -1779,7 +1780,7 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] CLI usage examples and validation flow
 - [x] cleanup of obsolete Python-first scaffolding
 - [x] move retained architecture-study snapshots under `archive/reference_data/`
-- [x] CLI session resume for persisted sessions (explicit id and `latest`)
+- [x] CLI session resume for persisted sessions (`resume <selector> <prompt>` — raw id, `latest`, and `label:<name>`) routed through the shared selector-resolution path; the resumed turn is appended to the existing persisted session, `updated_at_ms` is refreshed, and machine-readable JSON output continues to identify the actual resolved `session_id` via `resumed_session_id` rather than the typed selector string; selector failures stay deterministic (unknown id/label → `SessionNotFound`, duplicate labels → `AmbiguousLabel`, empty `label:` → `MalformedSelector`)
 - [x] Persisted transcript files per session and CLI transcript inspection (`transcript-show <selector>` — raw id, `latest`, and `label:<name>`)
 - [x] CLI session export for persisted session bundles (`session-export <selector>` — raw id, `latest`, and `label:<name>`) in a deterministic JSON shape packaging session state plus transcript, with `exported_session_id` surfacing the actual resolved `session_id` rather than the typed selector string and selector failures routed through the shared `SessionNotFound` / `AmbiguousLabel` / `MalformedSelector` diagnostics
 - [x] CLI session comparison for persisted sessions (`session-compare <left-selector> <right-selector>` — each side independently accepts raw `session_id`, `latest`, or `label:<name>` routed through the shared selector-resolution path) in a deterministic JSON shape that identifies both compared session ids as the actual resolved `session_id` values (never the typed selector strings) and reports signed deltas for recency metadata and transcript/turn counts, with selector failure semantics routed through the shared `SessionNotFound` / `AmbiguousLabel` / `MalformedSelector` diagnostics independently on each side
