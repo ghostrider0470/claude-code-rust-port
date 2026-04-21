@@ -437,11 +437,12 @@ cargo run -q -p harness-cli -- sessions --limit 1
 
 Inspect the persisted state of a single session. `<selector>` accepts any of the three forms every other single-session command accepts — a raw `session_id`, the literal `latest`, or `label:<name>` — routed through the shared selector-resolution path. Selector failure semantics are unchanged: unknown ids and unknown labels surface as `session not found`, duplicate labels surface as `ambiguous label`, and `label:` with no name surfaces as `malformed selector`. The JSON output always restates the actual resolved `session_id`, never the typed selector string.
 
-Pass `--limit <n>` to cap the `messages` array to at most the first `n` messages in the existing canonical append order. The outer JSON shape is preserved — `--limit` only truncates `messages`; no wrapper object is introduced. `--limit 0` returns `messages: []` cleanly, a `--limit` larger than the persisted message count returns every message cleanly, and omitting `--limit` preserves the unlimited behavior below exactly. Negative and non-numeric `--limit` values fail cleanly at parse time. No persisted session state, transcript entry, label, pinned flag, id, path, or ordering metadata is mutated.
+Pass `--limit <n>` to cap the `messages` array to at most the first `n` messages in the existing canonical append order. Pass `--tail <n>` instead to inspect only the newest `n` messages while preserving canonical append order within the returned slice. The outer JSON shape is preserved for both flags — they only reshape `messages`; no wrapper object is introduced. `--limit 0` / `--tail 0` return `messages: []` cleanly, a `--limit` / `--tail` larger than the persisted message count returns every message cleanly, and omitting both preserves the unlimited behavior below exactly. `--limit` and `--tail` are mutually exclusive at parse time so output-shaping semantics stay deterministic. Negative and non-numeric `--limit` / `--tail` values fail cleanly at parse time. No persisted session state, transcript entry, label, pinned flag, id, path, or ordering metadata is mutated.
 
 ```bash
 cargo run -q -p harness-cli -- session-show <session-id>
 cargo run -q -p harness-cli -- session-show <session-id> --limit 1
+cargo run -q -p harness-cli -- session-show <session-id> --tail 1
 ```
 
 ```json
