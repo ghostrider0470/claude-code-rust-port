@@ -8,13 +8,13 @@ use harness_session::{
     SessionPrune, SessionRename, SessionRetag, SessionSelectorCheck, SessionState, SessionStore,
     SessionTranscriptContext, SessionTranscriptEntryCount, SessionTranscriptFind,
     SessionTranscriptFirstTurn, SessionTranscriptHasEntries, SessionTranscriptLastTurn,
-    SessionTranscriptRange, SessionTranscriptTail, SessionTranscriptTurnShow,
-    SessionUnlabel, SessionUnpin, TranscriptRecord, TranscriptStore,
+    SessionTranscriptRange, SessionTranscriptTail, SessionTranscriptTurnExists,
+    SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin, TranscriptRecord, TranscriptStore,
 };
-use std::fs;
-use std::path::Path;
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
+use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -438,11 +438,13 @@ impl RuntimeEngine {
 
     pub fn import_session(&self, bundle_path: &str) -> Result<SessionImport, String> {
         let path = Path::new(bundle_path);
-        let body = fs::read_to_string(path).map_err(|err| {
-            format!("failed to read bundle at {}: {err}", path.display())
-        })?;
+        let body = fs::read_to_string(path)
+            .map_err(|err| format!("failed to read bundle at {}: {err}", path.display()))?;
         let bundle: SessionExport = serde_json::from_str(&body).map_err(|err| {
-            format!("failed to parse session bundle at {}: {err}", path.display())
+            format!(
+                "failed to parse session bundle at {}: {err}",
+                path.display()
+            )
         })?;
         self.store
             .import_bundle(&bundle)
@@ -465,9 +467,7 @@ impl RuntimeEngine {
 
     pub fn unlabel_session(&self, target: &str) -> Result<SessionUnlabel, String> {
         let resolved = self.resolve_selector(target)?;
-        self.store
-            .unlabel(&resolved)
-            .map_err(|err| err.to_string())
+        self.store.unlabel(&resolved).map_err(|err| err.to_string())
     }
 
     pub fn retag_session(&self, target: &str, label: &str) -> Result<SessionRetag, String> {
@@ -496,10 +496,7 @@ impl RuntimeEngine {
         self.store.unpin(&resolved).map_err(|err| err.to_string())
     }
 
-    pub fn check_session_selector(
-        &self,
-        selector: &str,
-    ) -> Result<SessionSelectorCheck, String> {
+    pub fn check_session_selector(&self, selector: &str) -> Result<SessionSelectorCheck, String> {
         self.store
             .check_selector(selector)
             .map_err(|err| err.to_string())
@@ -594,6 +591,16 @@ impl RuntimeEngine {
             .map_err(|err| err.to_string())
     }
 
+    pub fn turn_exists_session_transcript(
+        &self,
+        selector: &str,
+        turn: usize,
+    ) -> Result<SessionTranscriptTurnExists, String> {
+        self.store
+            .turn_exists_transcript(selector, turn)
+            .map_err(|err| err.to_string())
+    }
+
     fn comparison_side_for(&self, id: &str) -> Result<SessionComparisonSide, String> {
         let session = self.load_session(id)?;
         let transcript = self
@@ -679,7 +686,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["review bash".to_string(), "summary please".to_string()]
         );
-        assert_eq!(resumed.session.created_at_ms, bootstrap.session.created_at_ms);
+        assert_eq!(
+            resumed.session.created_at_ms,
+            bootstrap.session.created_at_ms
+        );
         assert!(resumed.session.updated_at_ms >= original_updated);
 
         assert!(resumed.events.iter().any(|event| matches!(
@@ -725,7 +735,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
 
         let resumed = engine
-            .resume(&first.session.session_id.to_string(), Prompt::new("follow up"))
+            .resume(
+                &first.session.session_id.to_string(),
+                Prompt::new("follow up"),
+            )
             .expect("resume first session");
         std::thread::sleep(std::time::Duration::from_millis(2));
 
@@ -734,8 +747,7 @@ mod tests {
             .expect("resume via latest");
 
         assert_eq!(
-            resumed_via_latest.resumed_session_id,
-            resumed.resumed_session_id,
+            resumed_via_latest.resumed_session_id, resumed.resumed_session_id,
             "latest should point at most recently updated session"
         );
 
@@ -768,9 +780,7 @@ mod tests {
                 if path == &bootstrap.persisted_transcript_path
         )));
 
-        let loaded = engine
-            .load_transcript(&id)
-            .expect("load transcript by id");
+        let loaded = engine.load_transcript(&id).expect("load transcript by id");
         assert_eq!(loaded.session_id.to_string(), id);
         assert_eq!(loaded.entries.len(), 1);
         assert_eq!(loaded.entries[0].prompt.0, "review bash");
@@ -852,7 +862,10 @@ mod tests {
         );
 
         let latest_export = engine.export_session("latest").expect("export latest");
-        assert_eq!(latest_export, export, "`latest` must resolve to the same bundle");
+        assert_eq!(
+            latest_export, export,
+            "`latest` must resolve to the same bundle"
+        );
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }
@@ -1395,7 +1408,9 @@ mod tests {
         assert!(report.transcript.flushed);
         assert_eq!(report.session.messages, vec![Prompt::new("review bash")]);
         assert_eq!(reloaded, report.session);
-        assert!(report.persisted_path.starts_with(root.to_string_lossy().as_ref()));
+        assert!(report
+            .persisted_path
+            .starts_with(root.to_string_lossy().as_ref()));
 
         assert!(report.events.iter().any(|event| matches!(
             event,
@@ -1439,9 +1454,7 @@ mod tests {
         assert_eq!(renamed.renamed_session_id.to_string(), id);
         assert_eq!(renamed.applied_label, "runtime-review");
 
-        let reloaded = engine
-            .load_session(&id)
-            .expect("reload renamed session");
+        let reloaded = engine.load_session(&id).expect("reload renamed session");
         assert_eq!(reloaded.session_id.to_string(), id);
         assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
         assert_eq!(reloaded.messages, original_messages);
@@ -1600,7 +1613,9 @@ mod tests {
         let malformed = engine.load_session("label:");
         assert!(malformed.is_err(), "malformed selector must fail");
         assert!(
-            malformed.unwrap_err().contains("malformed session selector"),
+            malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
             "error should mention malformed selector"
         );
 
@@ -1621,9 +1636,13 @@ mod tests {
 
         // Three bootstraps in time order. Only two get labeled, and the newest
         // of those is the one we label second.
-        let older = engine.bootstrap(Prompt::new("alpha")).expect("bootstrap alpha");
+        let older = engine
+            .bootstrap(Prompt::new("alpha"))
+            .expect("bootstrap alpha");
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let middle = engine.bootstrap(Prompt::new("beta")).expect("bootstrap beta");
+        let middle = engine
+            .bootstrap(Prompt::new("beta"))
+            .expect("bootstrap beta");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let newest = engine
             .bootstrap(Prompt::new("gamma"))
@@ -1684,7 +1703,9 @@ mod tests {
 
         // With no labeled sessions yet, the listing must be cleanly empty —
         // even when unlabeled sessions exist.
-        let _ = engine.bootstrap(Prompt::new("unlabeled")).expect("bootstrap");
+        let _ = engine
+            .bootstrap(Prompt::new("unlabeled"))
+            .expect("bootstrap");
         let empty = engine.list_session_labels().expect("list empty");
         assert!(
             empty.is_empty(),
@@ -1693,9 +1714,13 @@ mod tests {
 
         // Two sessions sharing the same label must both appear — ambiguity is
         // discoverable, not collapsed.
-        let first = engine.bootstrap(Prompt::new("alpha")).expect("bootstrap alpha");
+        let first = engine
+            .bootstrap(Prompt::new("alpha"))
+            .expect("bootstrap alpha");
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let second = engine.bootstrap(Prompt::new("beta")).expect("bootstrap beta");
+        let second = engine
+            .bootstrap(Prompt::new("beta"))
+            .expect("bootstrap beta");
 
         engine
             .rename_session(&first.session.session_id.to_string(), "dup")
@@ -1739,9 +1764,13 @@ mod tests {
 
         // Three bootstraps in time order. Only the older and the newest get
         // pinned; the middle one stays unpinned and must be omitted.
-        let older = engine.bootstrap(Prompt::new("alpha")).expect("bootstrap alpha");
+        let older = engine
+            .bootstrap(Prompt::new("alpha"))
+            .expect("bootstrap alpha");
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let middle = engine.bootstrap(Prompt::new("beta")).expect("bootstrap beta");
+        let middle = engine
+            .bootstrap(Prompt::new("beta"))
+            .expect("bootstrap beta");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let newest = engine
             .bootstrap(Prompt::new("gamma"))
@@ -1795,7 +1824,10 @@ mod tests {
         let reloaded_middle = engine
             .load_session(&middle.session.session_id.to_string())
             .expect("reload middle");
-        assert!(!reloaded_middle.pinned, "listing must not mutate persisted pinned state");
+        assert!(
+            !reloaded_middle.pinned,
+            "listing must not mutate persisted pinned state"
+        );
 
         fs::remove_dir_all(&root).expect("remove temp runtime test directory");
     }
@@ -1819,7 +1851,10 @@ mod tests {
 
         for invalid in ["", "   ", "\t\n"] {
             let result = engine.rename_session(&id, invalid);
-            assert!(result.is_err(), "empty/whitespace label {invalid:?} must fail");
+            assert!(
+                result.is_err(),
+                "empty/whitespace label {invalid:?} must fail"
+            );
             assert!(
                 result.unwrap_err().contains("invalid session label"),
                 "invalid label error should mention label"
@@ -1859,7 +1894,9 @@ mod tests {
 
         let first = engine.bootstrap(Prompt::new("first")).expect("bootstrap 1");
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let second = engine.bootstrap(Prompt::new("second")).expect("bootstrap 2");
+        let second = engine
+            .bootstrap(Prompt::new("second"))
+            .expect("bootstrap 2");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let third = engine.bootstrap(Prompt::new("third")).expect("bootstrap 3");
 
@@ -1909,9 +1946,13 @@ mod tests {
             store: SessionStore::new(&root),
         };
 
-        let older = engine.bootstrap(Prompt::new("older")).expect("bootstrap older");
+        let older = engine
+            .bootstrap(Prompt::new("older"))
+            .expect("bootstrap older");
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let newer = engine.bootstrap(Prompt::new("newer")).expect("bootstrap newer");
+        let newer = engine
+            .bootstrap(Prompt::new("newer"))
+            .expect("bootstrap newer");
         let older_id = older.session.session_id.to_string();
         let newer_id = newer.session.session_id.to_string();
 
@@ -1962,7 +2003,9 @@ mod tests {
 
         let first = engine.bootstrap(Prompt::new("first")).expect("bootstrap 1");
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let second = engine.bootstrap(Prompt::new("second")).expect("bootstrap 2");
+        let second = engine
+            .bootstrap(Prompt::new("second"))
+            .expect("bootstrap 2");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let third = engine.bootstrap(Prompt::new("third")).expect("bootstrap 3");
 

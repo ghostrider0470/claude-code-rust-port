@@ -17,32 +17,71 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum CliCommand {
     Summary,
-    Route { prompt: String },
-    Bootstrap { prompt: String },
-    Resume { id: String, prompt: String },
+    Route {
+        prompt: String,
+    },
+    Bootstrap {
+        prompt: String,
+    },
+    Resume {
+        id: String,
+        prompt: String,
+    },
     Tools,
     Commands,
     Sessions,
-    SessionShow { id: String },
-    TranscriptShow { id: String },
-    SessionExport { id: String },
-    SessionCompare { left: String, right: String },
-    SessionDelete { id: String },
-    SessionImport { path: String },
-    SessionFind { query: String },
-    SessionFork { id: String, prompt: String },
-    SessionRename { id: String, label: String },
-    SessionUnlabel { id: String },
-    SessionRetag { id: String, label: String },
+    SessionShow {
+        id: String,
+    },
+    TranscriptShow {
+        id: String,
+    },
+    SessionExport {
+        id: String,
+    },
+    SessionCompare {
+        left: String,
+        right: String,
+    },
+    SessionDelete {
+        id: String,
+    },
+    SessionImport {
+        path: String,
+    },
+    SessionFind {
+        query: String,
+    },
+    SessionFork {
+        id: String,
+        prompt: String,
+    },
+    SessionRename {
+        id: String,
+        label: String,
+    },
+    SessionUnlabel {
+        id: String,
+    },
+    SessionRetag {
+        id: String,
+        label: String,
+    },
     SessionLabels,
     SessionPins,
     SessionPrune {
         #[arg(long)]
         keep: usize,
     },
-    SessionPin { id: String },
-    SessionUnpin { id: String },
-    SessionSelectorCheck { selector: String },
+    SessionPin {
+        id: String,
+    },
+    SessionUnpin {
+        id: String,
+    },
+    SessionSelectorCheck {
+        selector: String,
+    },
     TranscriptTail {
         selector: String,
         #[arg(long, default_value_t = DEFAULT_TRANSCRIPT_TAIL_COUNT)]
@@ -85,6 +124,11 @@ enum CliCommand {
     TranscriptHasEntries {
         selector: String,
     },
+    TranscriptTurnExists {
+        selector: String,
+        #[arg(long)]
+        turn: usize,
+    },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -121,13 +165,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             serde_json::to_string_pretty(&session).expect("serialize session")
         }
         CliCommand::TranscriptShow { id } => {
-            let transcript = engine
-                .load_transcript(&id)
-                .expect("load transcript by id");
+            let transcript = engine.load_transcript(&id).expect("load transcript by id");
             serde_json::to_string_pretty(&transcript).expect("serialize transcript")
         }
         CliCommand::SessionExport { id } => {
-            let export = engine.export_session(&id).expect("export persisted session");
+            let export = engine
+                .export_session(&id)
+                .expect("export persisted session");
             serde_json::to_string_pretty(&export).expect("serialize session export")
         }
         CliCommand::SessionCompare { left, right } => {
@@ -271,8 +315,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             let has_entries = engine
                 .has_entries_session_transcript(&selector)
                 .expect("has-entries persisted session transcript");
-            serde_json::to_string_pretty(&has_entries)
-                .expect("serialize transcript has-entries")
+            serde_json::to_string_pretty(&has_entries).expect("serialize transcript has-entries")
+        }
+        CliCommand::TranscriptTurnExists { selector, turn } => {
+            let turn_exists = engine
+                .turn_exists_session_transcript(&selector, turn)
+                .expect("turn-exists persisted session transcript");
+            serde_json::to_string_pretty(&turn_exists).expect("serialize transcript turn-exists")
         }
     }
 }
@@ -295,10 +344,9 @@ mod tests {
         SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionTranscriptContext,
         SessionTranscriptEntryCount, SessionTranscriptFind, SessionTranscriptFirstTurn,
         SessionTranscriptHasEntries, SessionTranscriptLastTurn, SessionTranscriptRange,
-        SessionTranscriptTail, SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin,
-        TranscriptRecord,
-        DEFAULT_TRANSCRIPT_CONTEXT_WINDOW, DEFAULT_TRANSCRIPT_RANGE_COUNT,
-        DEFAULT_TRANSCRIPT_TAIL_COUNT,
+        SessionTranscriptTail, SessionTranscriptTurnExists, SessionTranscriptTurnShow,
+        SessionUnlabel, SessionUnpin, TranscriptRecord, DEFAULT_TRANSCRIPT_CONTEXT_WINDOW,
+        DEFAULT_TRANSCRIPT_RANGE_COUNT, DEFAULT_TRANSCRIPT_TAIL_COUNT,
     };
     use harness_tools::{PermissionPolicy, ToolRegistry};
     use std::fs;
@@ -467,10 +515,7 @@ mod tests {
             },
         );
 
-        assert_eq!(
-            output,
-            readme_output_block("route \"review bash\"", "json")
-        );
+        assert_eq!(output, readme_output_block("route \"review bash\"", "json"));
 
         fs::remove_dir_all(&root).ok();
     }
@@ -960,7 +1005,10 @@ mod tests {
         assert_eq!(deletion.deleted_session_id.to_string(), session_id);
         assert_eq!(deletion.removed_paths.len(), 2);
         for path in &deletion.removed_paths {
-            assert!(!std::path::Path::new(path).exists(), "removed path must not exist");
+            assert!(
+                !std::path::Path::new(path).exists(),
+                "removed path must not exist"
+            );
         }
 
         assert_eq!(
@@ -969,7 +1017,10 @@ mod tests {
         );
 
         let after = engine.list_sessions().expect("list after delete");
-        assert!(after.is_empty(), "session listing must be empty after delete");
+        assert!(
+            after.is_empty(),
+            "session listing must be empty after delete"
+        );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
@@ -1034,8 +1085,8 @@ mod tests {
                 id: session_id.clone(),
             },
         );
-        let bundle_path = std::env::temp_dir()
-            .join(format!("harness-cli-import-bundle-{session_id}.json"));
+        let bundle_path =
+            std::env::temp_dir().join(format!("harness-cli-import-bundle-{session_id}.json"));
         fs::write(&bundle_path, &export_output).expect("write bundle file");
 
         let target_root = temp_session_root();
@@ -1105,8 +1156,8 @@ mod tests {
         let root = temp_session_root();
         let engine = temp_engine(&root);
 
-        let missing = std::env::temp_dir()
-            .join("harness-cli-import-bundle-definitely-missing-xyzzy.json");
+        let missing =
+            std::env::temp_dir().join("harness-cli-import-bundle-definitely-missing-xyzzy.json");
         let _ = fs::remove_file(&missing);
 
         let result = engine.import_session(missing.to_string_lossy().as_ref());
@@ -1149,7 +1200,11 @@ mod tests {
 
         let results: Vec<SessionFindResult> =
             serde_json::from_str(&find_output).expect("parse session-find output");
-        assert_eq!(results.len(), 1, "exactly one persisted session should match");
+        assert_eq!(
+            results.len(),
+            1,
+            "exactly one persisted session should match"
+        );
         assert_eq!(results[0].session_id.to_string(), session_id);
         assert_eq!(results[0].matches.len(), 1);
         assert_eq!(results[0].matches[0].turn_index.0, 0);
@@ -1650,7 +1705,9 @@ mod tests {
         let malformed = engine.load_session("label:");
         assert!(malformed.is_err(), "malformed selector must fail cleanly");
         assert!(
-            malformed.unwrap_err().contains("malformed session selector"),
+            malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
             "malformed-selector error must mention malformed selector"
         );
 
@@ -1658,7 +1715,8 @@ mod tests {
     }
 
     #[test]
-    fn session_labels_matches_readme_example_and_orders_newest_first_omits_unlabeled_and_keeps_duplicates_separate() {
+    fn session_labels_matches_readme_example_and_orders_newest_first_omits_unlabeled_and_keeps_duplicates_separate(
+    ) {
         let root = temp_session_root();
         let engine = temp_engine(&root);
 
@@ -2553,10 +2611,7 @@ mod tests {
         // Empty/whitespace-only labels.
         for invalid in ["", "   ", "\t\n"] {
             let result = engine.retag_session(&session_id, invalid);
-            assert!(
-                result.is_err(),
-                "empty/whitespace label must fail to retag"
-            );
+            assert!(result.is_err(), "empty/whitespace label must fail to retag");
         }
 
         // Unknown session id.
@@ -2707,10 +2762,7 @@ mod tests {
         assert_eq!(prune.pruned_count, 0);
         assert!(prune.removed.is_empty());
 
-        assert_eq!(
-            output,
-            readme_output_block("session-prune <no-op>", "json")
-        );
+        assert_eq!(output, readme_output_block("session-prune <no-op>", "json"));
 
         // Nothing was removed: the session is still loadable with its
         // transcript intact.
@@ -2772,7 +2824,10 @@ mod tests {
             );
         }
 
-        assert!(engine.list_sessions().expect("list after full prune").is_empty());
+        assert!(engine
+            .list_sessions()
+            .expect("list after full prune")
+            .is_empty());
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
@@ -2783,14 +2838,10 @@ mod tests {
         let engine = temp_engine(&root);
 
         let id = bootstrap_session_id(&engine, "pin me");
-        let output = render_command(
-            &engine,
-            CliCommand::SessionPin { id: id.clone() },
-        );
+        let output = render_command(&engine, CliCommand::SessionPin { id: id.clone() });
 
         // Machine-readable JSON exposes the resolved session id and the pinned state.
-        let pin: SessionPin =
-            serde_json::from_str(&output).expect("parse session-pin output");
+        let pin: SessionPin = serde_json::from_str(&output).expect("parse session-pin output");
         assert_eq!(pin.pinned_session_id.to_string(), id);
         assert!(pin.pinned);
         // Deterministic README block (pinned `true`, resolved id placeholder).
@@ -2876,8 +2927,7 @@ mod tests {
 
         // After unpin the persisted JSON is backward-compatible (no `pinned` key).
         let persisted_path = root.join(format!("{id}.json"));
-        let persisted =
-            std::fs::read_to_string(&persisted_path).expect("read persisted json");
+        let persisted = std::fs::read_to_string(&persisted_path).expect("read persisted json");
         assert!(
             !persisted.contains("\"pinned\""),
             "unpinned persisted JSON must not serialize `pinned`: {persisted}"
@@ -2894,10 +2944,7 @@ mod tests {
         let id = bootstrap_session_id(&engine, "pin cycle");
         engine.pin_session(&id).expect("pin for unpin fixture");
 
-        let output = render_command(
-            &engine,
-            CliCommand::SessionUnpin { id: id.clone() },
-        );
+        let output = render_command(&engine, CliCommand::SessionUnpin { id: id.clone() });
         let unpin: SessionUnpin =
             serde_json::from_str(&output).expect("parse session-unpin output");
         assert_eq!(unpin.unpinned_session_id.to_string(), id);
@@ -2943,10 +2990,12 @@ mod tests {
         assert_eq!(prune.pinned_preserved_count, 1);
         assert_eq!(
             prune.pinned_preserved,
-            vec![engine
-                .load_session(&pinned_id)
-                .expect("load pinned")
-                .session_id]
+            vec![
+                engine
+                    .load_session(&pinned_id)
+                    .expect("load pinned")
+                    .session_id
+            ]
         );
 
         // Survivors: newest + pinned-oldest. Middle is gone from disk and from listing.
@@ -2958,9 +3007,7 @@ mod tests {
             .collect();
         assert_eq!(remaining, vec![newest_id.clone(), pinned_id.clone()]);
         assert!(!root.join(format!("{middle_id}.json")).exists());
-        assert!(!root
-            .join(format!("{middle_id}.transcript.json"))
-            .exists());
+        assert!(!root.join(format!("{middle_id}.transcript.json")).exists());
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
@@ -2988,7 +3035,10 @@ mod tests {
         assert_eq!(check.message_count, 1);
         assert_eq!(check.created_at_ms, before.created_at_ms);
         assert_eq!(check.updated_at_ms, before.updated_at_ms);
-        assert_eq!(check.persisted_path, root.join(format!("{id}.json")).display().to_string());
+        assert_eq!(
+            check.persisted_path,
+            root.join(format!("{id}.json")).display().to_string()
+        );
         assert!(check.label.is_none());
         assert!(!check.pinned);
 
@@ -3005,7 +3055,9 @@ mod tests {
         // Check does not mutate any persisted state.
         let after = engine.load_session(&id).expect("reload after check");
         assert_eq!(after, before);
-        let after_transcript = engine.load_transcript(&id).expect("reload transcript after");
+        let after_transcript = engine
+            .load_transcript(&id)
+            .expect("reload transcript after");
         assert_eq!(after_transcript, before_transcript);
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
@@ -3187,7 +3239,11 @@ mod tests {
         let engine = temp_engine(&root);
 
         let id = bootstrap_session_id(&engine, "first prompt");
-        extend_transcript(&engine, &id, &["second prompt", "third prompt", "fourth prompt"]);
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
 
         let before_transcript = engine.load_transcript(&id).expect("reload transcript");
 
@@ -3205,11 +3261,17 @@ mod tests {
         assert_eq!(tail.resolved_session_id.to_string(), id);
         assert_eq!(tail.total_entries, 4);
         assert_eq!(tail.returned_entries, 2);
-        let returned_prompts: Vec<&str> =
-            tail.entries.iter().map(|entry| entry.prompt.0.as_str()).collect();
+        let returned_prompts: Vec<&str> = tail
+            .entries
+            .iter()
+            .map(|entry| entry.prompt.0.as_str())
+            .collect();
         assert_eq!(returned_prompts, vec!["third prompt", "fourth prompt"]);
-        let returned_indices: Vec<usize> =
-            tail.entries.iter().map(|entry| entry.turn_index.0).collect();
+        let returned_indices: Vec<usize> = tail
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .collect();
         assert_eq!(returned_indices, vec![2, 3]);
 
         let after_transcript = engine.load_transcript(&id).expect("reload after tail");
@@ -3274,8 +3336,11 @@ mod tests {
         assert_eq!(tail.resolved_session_id.to_string(), id);
         assert_eq!(tail.total_entries, 2);
         assert_eq!(tail.returned_entries, 2);
-        let prompts: Vec<&str> =
-            tail.entries.iter().map(|entry| entry.prompt.0.as_str()).collect();
+        let prompts: Vec<&str> = tail
+            .entries
+            .iter()
+            .map(|entry| entry.prompt.0.as_str())
+            .collect();
         assert_eq!(prompts, vec!["labeled transcript", "labeled follow-up"]);
 
         let reloaded = engine.load_session(&id).expect("reload after tail");
@@ -3364,8 +3429,12 @@ mod tests {
         let first = bootstrap_session_id(&engine, "first dup");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let second = bootstrap_session_id(&engine, "second dup");
-        engine.rename_session(&first, "duplicate").expect("label first");
-        engine.rename_session(&second, "duplicate").expect("label second");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
 
         let err = engine
             .tail_session_transcript("label:duplicate", 5)
@@ -3425,11 +3494,9 @@ mod tests {
         assert_eq!(find.query, "REVIEW");
         assert_eq!(find.total_entries, 4);
         assert_eq!(find.match_count, 2);
-        let matched_prompts: Vec<&str> =
-            find.matches.iter().map(|m| m.prompt.0.as_str()).collect();
+        let matched_prompts: Vec<&str> = find.matches.iter().map(|m| m.prompt.0.as_str()).collect();
         assert_eq!(matched_prompts, vec!["Review bash runtime", "review tools"]);
-        let matched_indices: Vec<usize> =
-            find.matches.iter().map(|m| m.turn_index.0).collect();
+        let matched_indices: Vec<usize> = find.matches.iter().map(|m| m.turn_index.0).collect();
         assert_eq!(matched_indices, vec![0, 2]);
 
         let after_transcript = engine.load_transcript(&id).expect("reload after find");
@@ -3494,11 +3561,9 @@ mod tests {
         assert_eq!(find.resolved_session_id.to_string(), id);
         assert_eq!(find.total_entries, 3);
         assert_eq!(find.match_count, 2);
-        let matched_prompts: Vec<&str> =
-            find.matches.iter().map(|m| m.prompt.0.as_str()).collect();
+        let matched_prompts: Vec<&str> = find.matches.iter().map(|m| m.prompt.0.as_str()).collect();
         assert_eq!(matched_prompts, vec!["labeled review", "second review"]);
-        let matched_indices: Vec<usize> =
-            find.matches.iter().map(|m| m.turn_index.0).collect();
+        let matched_indices: Vec<usize> = find.matches.iter().map(|m| m.turn_index.0).collect();
         assert_eq!(matched_indices, vec![0, 1]);
 
         let reloaded = engine.load_session(&id).expect("reload after find");
@@ -3585,8 +3650,12 @@ mod tests {
         let first = bootstrap_session_id(&engine, "first dup");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let second = bootstrap_session_id(&engine, "second dup");
-        engine.rename_session(&first, "duplicate").expect("label first");
-        engine.rename_session(&second, "duplicate").expect("label second");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
 
         let err = engine
             .find_in_session_transcript("label:duplicate", "anything")
@@ -3654,8 +3723,11 @@ mod tests {
             .map(|entry| entry.prompt.0.as_str())
             .collect();
         assert_eq!(returned_prompts, vec!["second prompt", "third prompt"]);
-        let returned_indices: Vec<usize> =
-            range.entries.iter().map(|entry| entry.turn_index.0).collect();
+        let returned_indices: Vec<usize> = range
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .collect();
         assert_eq!(returned_indices, vec![1, 2]);
 
         let after_transcript = engine.load_transcript(&id).expect("reload after range");
@@ -3697,8 +3769,11 @@ mod tests {
             .map(|entry| entry.prompt.0.as_str())
             .collect();
         assert_eq!(prompts, vec!["newer follow-up", "newer third"]);
-        let indices: Vec<usize> =
-            range.entries.iter().map(|entry| entry.turn_index.0).collect();
+        let indices: Vec<usize> = range
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .collect();
         assert_eq!(indices, vec![1, 2]);
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
@@ -3920,7 +3995,9 @@ mod tests {
         let first = bootstrap_session_id(&engine, "first dup");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let second = bootstrap_session_id(&engine, "second dup");
-        engine.rename_session(&first, "duplicate").expect("label first");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
         engine
             .rename_session(&second, "duplicate")
             .expect("label second");
@@ -3963,7 +4040,12 @@ mod tests {
         extend_transcript(
             &engine,
             &id,
-            &["second prompt", "third prompt", "fourth prompt", "fifth prompt"],
+            &[
+                "second prompt",
+                "third prompt",
+                "fourth prompt",
+                "fifth prompt",
+            ],
         );
 
         let before_transcript = engine.load_transcript(&id).expect("reload transcript");
@@ -4323,7 +4405,9 @@ mod tests {
         let first = bootstrap_session_id(&engine, "first dup");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let second = bootstrap_session_id(&engine, "second dup");
-        engine.rename_session(&first, "duplicate").expect("label first");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
         engine
             .rename_session(&second, "duplicate")
             .expect("label second");
@@ -4516,14 +4600,9 @@ mod tests {
     fn transcript_turn_show_invalid_turn_is_rejected_by_clap_parse() {
         use clap::Parser;
 
-        let err = Cli::try_parse_from([
-            "harness",
-            "transcript-turn-show",
-            "some-id",
-            "--turn",
-            "-1",
-        ])
-        .expect_err("negative --turn must fail at parse time");
+        let err =
+            Cli::try_parse_from(["harness", "transcript-turn-show", "some-id", "--turn", "-1"])
+                .expect_err("negative --turn must fail at parse time");
         let rendered = err.to_string();
         assert!(
             rendered.contains("--turn") || rendered.contains("-1"),
@@ -4581,7 +4660,9 @@ mod tests {
         let first = bootstrap_session_id(&engine, "first dup");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let second = bootstrap_session_id(&engine, "second dup");
-        engine.rename_session(&first, "duplicate").expect("label first");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
         engine
             .rename_session(&second, "duplicate")
             .expect("label second");
@@ -5289,7 +5370,10 @@ mod tests {
             serde_json::from_str(&output).expect("parse transcript-has-entries output");
 
         assert_eq!(has_entries.selector, id);
-        assert_eq!(has_entries.resolved_session_id.to_string(), has_entries.selector);
+        assert_eq!(
+            has_entries.resolved_session_id.to_string(),
+            has_entries.selector
+        );
         assert_eq!(has_entries.total_entries, 2);
         assert!(has_entries.has_entries);
         assert_eq!(has_entries.created_at_ms, before_transcript.created_at_ms);
@@ -5323,8 +5407,8 @@ mod tests {
                 selector: "latest".to_string(),
             },
         );
-        let has_entries: SessionTranscriptHasEntries = serde_json::from_str(&output)
-            .expect("parse transcript-has-entries latest output");
+        let has_entries: SessionTranscriptHasEntries =
+            serde_json::from_str(&output).expect("parse transcript-has-entries latest output");
 
         assert_eq!(has_entries.selector, "latest");
         assert_eq!(has_entries.resolved_session_id.to_string(), newer);
@@ -5351,8 +5435,8 @@ mod tests {
                 selector: "label:runtime-review".to_string(),
             },
         );
-        let has_entries: SessionTranscriptHasEntries = serde_json::from_str(&output)
-            .expect("parse transcript-has-entries label output");
+        let has_entries: SessionTranscriptHasEntries =
+            serde_json::from_str(&output).expect("parse transcript-has-entries label output");
 
         assert_eq!(has_entries.selector, "label:runtime-review");
         assert_eq!(has_entries.resolved_session_id.to_string(), id);
@@ -5389,7 +5473,10 @@ mod tests {
             .has_entries_session_transcript(&session_id)
             .expect("empty transcript should succeed");
         assert_eq!(has_entries.selector, session_id);
-        assert_eq!(has_entries.resolved_session_id.to_string(), has_entries.selector);
+        assert_eq!(
+            has_entries.resolved_session_id.to_string(),
+            has_entries.selector
+        );
         assert_eq!(has_entries.total_entries, 0);
         assert!(!has_entries.has_entries);
         assert_eq!(has_entries.created_at_ms, session.created_at_ms);
@@ -5475,4 +5562,279 @@ mod tests {
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
 
+    #[test]
+    fn transcript_turn_exists_raw_id_reports_true_and_leaves_persisted_state_untouched() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let before_session = engine.load_session(&id).expect("reload session");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTurnExists {
+                selector: id.clone(),
+                turn: 1,
+            },
+        );
+        let turn_exists: SessionTranscriptTurnExists =
+            serde_json::from_str(&output).expect("parse transcript-turn-exists output");
+
+        assert_eq!(turn_exists.selector, id);
+        assert_eq!(
+            turn_exists.resolved_session_id.to_string(),
+            turn_exists.selector
+        );
+        assert_eq!(turn_exists.turn_index, 1);
+        assert_eq!(turn_exists.total_entries, 3);
+        assert!(turn_exists.exists);
+        assert_eq!(turn_exists.created_at_ms, before_transcript.created_at_ms);
+        assert_eq!(turn_exists.updated_at_ms, before_transcript.updated_at_ms);
+
+        let after_transcript = engine
+            .load_transcript(&turn_exists.selector)
+            .expect("reload after turn-exists");
+        assert_eq!(after_transcript, before_transcript);
+        let after_session = engine
+            .load_session(&turn_exists.selector)
+            .expect("reload session after turn-exists");
+        assert_eq!(after_session, before_session);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_exists_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer first");
+        extend_transcript(&engine, &newer, &["newer follow-up"]);
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTurnExists {
+                selector: "latest".to_string(),
+                turn: 1,
+            },
+        );
+        let turn_exists: SessionTranscriptTurnExists =
+            serde_json::from_str(&output).expect("parse transcript-turn-exists latest output");
+
+        assert_eq!(turn_exists.selector, "latest");
+        assert_eq!(turn_exists.resolved_session_id.to_string(), newer);
+        assert_eq!(turn_exists.turn_index, 1);
+        assert_eq!(turn_exists.total_entries, 2);
+        assert!(turn_exists.exists);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_exists_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled first");
+        extend_transcript(&engine, &id, &["labeled follow-up"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for turn-exists");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTurnExists {
+                selector: "label:runtime-review".to_string(),
+                turn: 1,
+            },
+        );
+        let turn_exists: SessionTranscriptTurnExists =
+            serde_json::from_str(&output).expect("parse transcript-turn-exists label output");
+
+        assert_eq!(turn_exists.selector, "label:runtime-review");
+        assert_eq!(turn_exists.resolved_session_id.to_string(), id);
+        assert_eq!(turn_exists.turn_index, 1);
+        assert_eq!(turn_exists.total_entries, 2);
+        assert!(turn_exists.exists);
+
+        let reloaded = engine.load_session(&id).expect("reload after turn-exists");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_exists_missing_turn_returns_false_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt"]);
+
+        let turn_exists = engine
+            .turn_exists_session_transcript(&id, 42)
+            .expect("out-of-range turn should succeed");
+        assert_eq!(turn_exists.selector, id);
+        assert_eq!(
+            turn_exists.resolved_session_id.to_string(),
+            turn_exists.selector
+        );
+        assert_eq!(turn_exists.turn_index, 42);
+        assert_eq!(turn_exists.total_entries, 2);
+        assert!(!turn_exists.exists);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_exists_empty_transcript_returns_false_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        let turn_exists = engine
+            .turn_exists_session_transcript(&session_id, 0)
+            .expect("empty transcript should succeed");
+        assert_eq!(turn_exists.selector, session_id);
+        assert_eq!(
+            turn_exists.resolved_session_id.to_string(),
+            turn_exists.selector
+        );
+        assert_eq!(turn_exists.turn_index, 0);
+        assert_eq!(turn_exists.total_entries, 0);
+        assert!(!turn_exists.exists);
+        assert_eq!(turn_exists.created_at_ms, empty_transcript.created_at_ms);
+        assert_eq!(turn_exists.updated_at_ms, empty_transcript.updated_at_ms);
+
+        let after = engine
+            .load_transcript(&turn_exists.selector)
+            .expect("reload empty transcript");
+        assert_eq!(after, empty_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_exists_invalid_turn_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-turn-exists",
+            "some-id",
+            "--turn",
+            "-1",
+        ])
+        .expect_err("negative --turn must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--turn") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --turn value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-turn-exists",
+            "some-id",
+            "--turn",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --turn must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--turn") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --turn value, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn transcript_turn_exists_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .turn_exists_session_transcript("00000000-0000-0000-0000-000000000000", 0)
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .turn_exists_session_transcript("label:nonexistent", 0)
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        assert!(engine.load_session(&anchor).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_exists_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
+
+        let err = engine
+            .turn_exists_session_transcript("label:duplicate", 0)
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_exists_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .turn_exists_session_transcript("label:", 0)
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
 }
