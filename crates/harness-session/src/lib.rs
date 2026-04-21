@@ -535,6 +535,16 @@ pub struct SessionTranscriptTurnRange {
     pub last_turn_index: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptHasTurnGaps {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub has_turn_gaps: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -1011,6 +1021,40 @@ impl SessionStore {
             total_entries,
             first_turn_index,
             last_turn_index,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// deterministic machine-readable summary describing whether the resolved
+    /// persisted transcript has any missing integer `turn_index` values between
+    /// the smallest and largest present `turn_index` values, without returning
+    /// transcript entries. The persisted transcript is not mutated. Empty
+    /// transcripts and single-entry transcripts succeed cleanly with
+    /// `has_turn_gaps: false`. Preserves existing selector failure semantics
+    /// unchanged (`SessionNotFound` / `AmbiguousLabel` / `MalformedSelector`).
+    pub fn has_turn_gaps_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptHasTurnGaps, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total_entries = transcript.entries.len();
+        let indexes: Vec<usize> = transcript
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .collect();
+        let has_turn_gaps = match (indexes.iter().min(), indexes.iter().max()) {
+            (Some(&min), Some(&max)) => (max - min + 1) != indexes.len(),
+            _ => false,
+        };
+        Ok(SessionTranscriptHasTurnGaps {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries,
+            has_turn_gaps,
         })
     }
 
