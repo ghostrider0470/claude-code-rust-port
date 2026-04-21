@@ -144,6 +144,8 @@ enum CliCommand {
     },
     TranscriptTurnIndexes {
         selector: String,
+        #[arg(long)]
+        limit: Option<usize>,
     },
     TranscriptTurnIndexRange {
         selector: String,
@@ -386,10 +388,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("turn-exists persisted session transcript");
             serde_json::to_string_pretty(&turn_exists).expect("serialize transcript turn-exists")
         }
-        CliCommand::TranscriptTurnIndexes { selector } => {
-            let turn_indexes = engine
+        CliCommand::TranscriptTurnIndexes { selector, limit } => {
+            let mut turn_indexes = engine
                 .turn_indexes_session_transcript(&selector)
                 .expect("turn-indexes persisted session transcript");
+            if let Some(limit) = limit {
+                turn_indexes.turn_indexes.truncate(limit);
+            }
             serde_json::to_string_pretty(&turn_indexes).expect("serialize transcript turn-indexes")
         }
         CliCommand::TranscriptTurnIndexRange { selector } => {
@@ -7273,6 +7278,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptTurnIndexes {
                 selector: id.clone(),
+                limit: None,
             },
         );
         let turn_indexes: SessionTranscriptTurnIndexes =
@@ -7314,6 +7320,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptTurnIndexes {
                 selector: "latest".to_string(),
+                limit: None,
             },
         );
         let turn_indexes: SessionTranscriptTurnIndexes =
@@ -7342,6 +7349,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptTurnIndexes {
                 selector: "label:runtime-review".to_string(),
+                limit: None,
             },
         );
         let turn_indexes: SessionTranscriptTurnIndexes =
@@ -7469,6 +7477,272 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    fn transcript_turn_indexes_output(
+        engine: &RuntimeEngine,
+        selector: &str,
+        limit: Option<usize>,
+    ) -> SessionTranscriptTurnIndexes {
+        let output = render_command(
+            engine,
+            CliCommand::TranscriptTurnIndexes {
+                selector: selector.to_string(),
+                limit,
+            },
+        );
+        serde_json::from_str(&output).expect("parse transcript-turn-indexes output")
+    }
+
+    #[test]
+    fn transcript_turn_indexes_omitted_limit_preserves_current_unlimited_behavior_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
+
+        let baseline = render_command(
+            &engine,
+            CliCommand::TranscriptTurnIndexes {
+                selector: id.clone(),
+                limit: None,
+            },
+        );
+        let explicit_large = render_command(
+            &engine,
+            CliCommand::TranscriptTurnIndexes {
+                selector: id.clone(),
+                limit: Some(usize::MAX),
+            },
+        );
+        assert_eq!(baseline, explicit_large);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&baseline).expect("parse transcript-turn-indexes baseline");
+        assert!(
+            parsed.is_object(),
+            "transcript-turn-indexes must return an object, got: {baseline}"
+        );
+        for key in [
+            "selector",
+            "resolved_session_id",
+            "created_at_ms",
+            "updated_at_ms",
+            "total_entries",
+            "turn_indexes",
+        ] {
+            assert!(
+                parsed.get(key).is_some(),
+                "expected key {key} in transcript-turn-indexes output, got: {baseline}"
+            );
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_with_limit_zero_returns_empty_turn_indexes_but_full_total_entries() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let turn_indexes = transcript_turn_indexes_output(&engine, &id, Some(0));
+        assert_eq!(turn_indexes.total_entries, 3);
+        assert!(turn_indexes.turn_indexes.is_empty());
+
+        let after_transcript = engine.load_transcript(&id).expect("reload after turn-indexes");
+        assert_eq!(after_transcript, before_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_with_limit_one_returns_only_first_index_in_ascending_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
+
+        let turn_indexes = transcript_turn_indexes_output(&engine, &id, Some(1));
+        assert_eq!(turn_indexes.total_entries, 4);
+        assert_eq!(turn_indexes.turn_indexes, vec![0]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_with_limit_smaller_than_total_truncates_in_ascending_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
+
+        let turn_indexes = transcript_turn_indexes_output(&engine, &id, Some(2));
+        assert_eq!(turn_indexes.total_entries, 4);
+        assert_eq!(turn_indexes.turn_indexes, vec![0, 1]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_with_limit_larger_than_total_returns_all_indexes() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let turn_indexes = transcript_turn_indexes_output(&engine, &id, Some(99));
+        assert_eq!(turn_indexes.total_entries, 3);
+        assert_eq!(turn_indexes.turn_indexes, vec![0, 1, 2]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_empty_transcript_with_and_without_limit_returns_empty_array() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        for limit in [None, Some(0), Some(5)] {
+            let turn_indexes = transcript_turn_indexes_output(&engine, &session_id, limit);
+            assert_eq!(turn_indexes.total_entries, 0);
+            assert!(turn_indexes.turn_indexes.is_empty());
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_latest_selector_honors_limit() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer first");
+        extend_transcript(&engine, &newer, &["newer second", "newer third"]);
+
+        let turn_indexes = transcript_turn_indexes_output(&engine, "latest", Some(2));
+        assert_eq!(turn_indexes.selector, "latest");
+        assert_eq!(turn_indexes.resolved_session_id.to_string(), newer);
+        assert_eq!(turn_indexes.total_entries, 3);
+        assert_eq!(turn_indexes.turn_indexes, vec![0, 1]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_label_selector_honors_limit() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled first");
+        extend_transcript(&engine, &id, &["labeled second", "labeled third"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for turn-indexes");
+
+        let turn_indexes =
+            transcript_turn_indexes_output(&engine, "label:runtime-review", Some(1));
+        assert_eq!(turn_indexes.selector, "label:runtime-review");
+        assert_eq!(turn_indexes.resolved_session_id.to_string(), id);
+        assert_eq!(turn_indexes.total_entries, 3);
+        assert_eq!(turn_indexes.turn_indexes, vec![0]);
+
+        let reloaded = engine.load_session(&id).expect("reload after turn-indexes");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_limit_does_not_mutate_persisted_transcript_or_metadata() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let before_session = engine.load_session(&id).expect("reload session");
+
+        let _ = transcript_turn_indexes_output(&engine, &id, Some(0));
+        let _ = transcript_turn_indexes_output(&engine, &id, Some(1));
+        let _ = transcript_turn_indexes_output(&engine, &id, Some(99));
+
+        let after_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let after_session = engine.load_session(&id).expect("reload session");
+        assert_eq!(after_transcript, before_transcript);
+        assert_eq!(after_session, before_session);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_invalid_limit_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-turn-indexes",
+            "some-id",
+            "--limit",
+            "-1",
+        ])
+        .expect_err("negative --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-turn-indexes",
+            "some-id",
+            "--limit",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
     }
 
     #[test]
