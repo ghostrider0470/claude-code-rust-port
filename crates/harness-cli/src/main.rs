@@ -42,14 +42,14 @@ enum CliCommand {
         limit: Option<usize>,
     },
     SessionExport {
-        id: String,
+        selector: String,
     },
     SessionCompare {
         left: String,
         right: String,
     },
     SessionDelete {
-        id: String,
+        selector: String,
     },
     SessionImport {
         path: String,
@@ -60,11 +60,11 @@ enum CliCommand {
         limit: Option<usize>,
     },
     SessionFork {
-        id: String,
+        selector: String,
         prompt: String,
     },
     SessionRename {
-        id: String,
+        selector: String,
         label: String,
     },
     SessionUnlabel {
@@ -87,10 +87,10 @@ enum CliCommand {
         keep: usize,
     },
     SessionPin {
-        id: String,
+        selector: String,
     },
     SessionUnpin {
-        id: String,
+        selector: String,
     },
     SessionSelectorCheck {
         selector: String,
@@ -229,10 +229,10 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             }
             serde_json::to_string_pretty(&transcript).expect("serialize transcript")
         }
-        CliCommand::SessionExport { id } => {
+        CliCommand::SessionExport { selector } => {
             let export = engine
-                .export_session(&id)
-                .expect("export persisted session");
+                .export_session(&selector)
+                .expect("export persisted session by selector");
             serde_json::to_string_pretty(&export).expect("serialize session export")
         }
         CliCommand::SessionCompare { left, right } => {
@@ -241,10 +241,10 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("compare persisted sessions");
             serde_json::to_string_pretty(&comparison).expect("serialize session comparison")
         }
-        CliCommand::SessionDelete { id } => {
+        CliCommand::SessionDelete { selector } => {
             let deletion = engine
-                .delete_session(&id)
-                .expect("delete persisted session");
+                .delete_session(&selector)
+                .expect("delete persisted session by selector");
             serde_json::to_string_pretty(&deletion).expect("serialize session deletion")
         }
         CliCommand::SessionImport { path } => {
@@ -262,16 +262,16 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
             }
             serde_json::to_string_pretty(&results).expect("serialize session find results")
         }
-        CliCommand::SessionFork { id, prompt } => {
+        CliCommand::SessionFork { selector, prompt } => {
             let fork = engine
-                .fork_session(&id, Prompt::new(prompt))
-                .expect("fork persisted session");
+                .fork_session(&selector, Prompt::new(prompt))
+                .expect("fork persisted session by selector");
             serde_json::to_string_pretty(&fork).expect("serialize session fork")
         }
-        CliCommand::SessionRename { id, label } => {
+        CliCommand::SessionRename { selector, label } => {
             let renamed = engine
-                .rename_session(&id, &label)
-                .expect("rename persisted session");
+                .rename_session(&selector, &label)
+                .expect("rename persisted session by selector");
             serde_json::to_string_pretty(&renamed).expect("serialize session rename")
         }
         CliCommand::SessionUnlabel { id } => {
@@ -310,12 +310,16 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("prune persisted sessions");
             serde_json::to_string_pretty(&pruned).expect("serialize session prune")
         }
-        CliCommand::SessionPin { id } => {
-            let pinned = engine.pin_session(&id).expect("pin persisted session");
+        CliCommand::SessionPin { selector } => {
+            let pinned = engine
+                .pin_session(&selector)
+                .expect("pin persisted session by selector");
             serde_json::to_string_pretty(&pinned).expect("serialize session pin")
         }
-        CliCommand::SessionUnpin { id } => {
-            let unpinned = engine.unpin_session(&id).expect("unpin persisted session");
+        CliCommand::SessionUnpin { selector } => {
+            let unpinned = engine
+                .unpin_session(&selector)
+                .expect("unpin persisted session by selector");
             serde_json::to_string_pretty(&unpinned).expect("serialize session unpin")
         }
         CliCommand::SessionSelectorCheck { selector } => {
@@ -1119,7 +1123,7 @@ mod tests {
         let export_output = render_command(
             &engine,
             CliCommand::SessionExport {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
 
@@ -1154,7 +1158,7 @@ mod tests {
 
         assert_eq!(
             normalize_session_output(&export_output, &session_id),
-            readme_output_block("session-export <id>", "json")
+            readme_output_block("session-export <selector>", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
@@ -1181,7 +1185,7 @@ mod tests {
         let latest_output = render_command(
             &engine,
             CliCommand::SessionExport {
-                id: "latest".to_string(),
+                selector: "latest".to_string(),
             },
         );
 
@@ -1327,7 +1331,7 @@ mod tests {
         let delete_output = render_command(
             &engine,
             CliCommand::SessionDelete {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
 
@@ -1344,7 +1348,7 @@ mod tests {
 
         assert_eq!(
             normalize_bootstrap_example(&delete_output, &session_id, &root),
-            readme_output_block("session-delete <id>", "json")
+            readme_output_block("session-delete <selector>", "json")
         );
 
         let after = engine.list_sessions().expect("list after delete");
@@ -1377,7 +1381,7 @@ mod tests {
         let latest_output = render_command(
             &engine,
             CliCommand::SessionDelete {
-                id: "latest".to_string(),
+                selector: "latest".to_string(),
             },
         );
 
@@ -1413,7 +1417,7 @@ mod tests {
         let export_output = render_command(
             &source_engine,
             CliCommand::SessionExport {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
         let bundle_path =
@@ -1950,7 +1954,7 @@ mod tests {
         let fork_output = render_command(
             &engine,
             CliCommand::SessionFork {
-                id: source_id.clone(),
+                selector: source_id.clone(),
                 prompt: "try again".to_string(),
             },
         );
@@ -2014,7 +2018,7 @@ mod tests {
         let forked_id = fork.forked_session_id.to_string();
         assert_eq!(
             normalize_fork_output(&fork_output, &source_id, &forked_id, &root),
-            readme_output_block("session-fork <source-session-id> \"try again\"", "json")
+            readme_output_block("session-fork <selector> \"try again\"", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
@@ -2041,7 +2045,7 @@ mod tests {
         let latest_output = render_command(
             &engine,
             CliCommand::SessionFork {
-                id: "latest".to_string(),
+                selector: "latest".to_string(),
                 prompt: "try again".to_string(),
             },
         );
@@ -2088,7 +2092,7 @@ mod tests {
         let rename_output = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -2118,7 +2122,7 @@ mod tests {
 
         assert_eq!(
             normalize_session_output(&rename_output, &session_id),
-            readme_output_block("session-rename <id> <label>", "json")
+            readme_output_block("session-rename <selector> <label>", "json")
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
@@ -2145,7 +2149,7 @@ mod tests {
         let latest_output = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: "latest".to_string(),
+                selector: "latest".to_string(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -2237,7 +2241,7 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -2277,7 +2281,7 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -2444,14 +2448,14 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: older_id.clone(),
+                selector: older_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: newest_id.clone(),
+                selector: newest_id.clone(),
                 label: "release-candidate".to_string(),
             },
         );
@@ -2495,7 +2499,7 @@ mod tests {
         let _ = render_command(
             &readme_engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -2541,14 +2545,14 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: first_id.clone(),
+                selector: first_id.clone(),
                 label: "dup".to_string(),
             },
         );
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: second_id.clone(),
+                selector: second_id.clone(),
                 label: "dup".to_string(),
             },
         );
@@ -2619,7 +2623,7 @@ mod tests {
         let _ = render_command(
             engine,
             CliCommand::SessionRename {
-                id: id.to_string(),
+                selector: id.to_string(),
                 label: label.to_string(),
             },
         );
@@ -2894,20 +2898,20 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: older_id.clone(),
+                selector: older_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
         let _ = render_command(
             &engine,
             CliCommand::SessionPin {
-                id: older_id.clone(),
+                selector: older_id.clone(),
             },
         );
         let _ = render_command(
             &engine,
             CliCommand::SessionPin {
-                id: newest_id.clone(),
+                selector: newest_id.clone(),
             },
         );
 
@@ -2958,14 +2962,14 @@ mod tests {
         let _ = render_command(
             &readme_engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
         let _ = render_command(
             &readme_engine,
             CliCommand::SessionPin {
-                id: session_id.clone(),
+                selector: session_id.clone(),
             },
         );
         let pins_output = render_command(&readme_engine, CliCommand::SessionPins { limit: None });
@@ -3029,7 +3033,7 @@ mod tests {
         let _ = render_command(
             engine,
             CliCommand::SessionPin {
-                id: id.to_string(),
+                selector: id.to_string(),
             },
         );
     }
@@ -3264,7 +3268,7 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -3345,7 +3349,7 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -3385,7 +3389,7 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -3519,7 +3523,7 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -3605,7 +3609,7 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -3654,7 +3658,7 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -3742,7 +3746,7 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -3997,7 +4001,7 @@ mod tests {
         let engine = temp_engine(&root);
 
         let id = bootstrap_session_id(&engine, "pin me");
-        let output = render_command(&engine, CliCommand::SessionPin { id: id.clone() });
+        let output = render_command(&engine, CliCommand::SessionPin { selector: id.clone() });
 
         // Machine-readable JSON exposes the resolved session id and the pinned state.
         let pin: SessionPin = serde_json::from_str(&output).expect("parse session-pin output");
@@ -4006,7 +4010,7 @@ mod tests {
         // Deterministic README block (pinned `true`, resolved id placeholder).
         assert_eq!(
             output.replace(&id, "<session-id>"),
-            readme_output_block("session-pin <id>", "json")
+            readme_output_block("session-pin <selector>", "json")
         );
 
         // The persisted session now carries `pinned: true` and preserves everything else.
@@ -4032,7 +4036,7 @@ mod tests {
         let output = render_command(
             &engine,
             CliCommand::SessionPin {
-                id: "latest".to_string(),
+                selector: "latest".to_string(),
             },
         );
         let pin: SessionPin =
@@ -4065,7 +4069,7 @@ mod tests {
         let pin_output = render_command(
             &engine,
             CliCommand::SessionPin {
-                id: "label:to-pin".to_string(),
+                selector: "label:to-pin".to_string(),
             },
         );
         let pin: SessionPin =
@@ -4076,7 +4080,7 @@ mod tests {
         let unpin_output = render_command(
             &engine,
             CliCommand::SessionUnpin {
-                id: "label:to-pin".to_string(),
+                selector: "label:to-pin".to_string(),
             },
         );
         let unpin: SessionUnpin =
@@ -4103,14 +4107,14 @@ mod tests {
         let id = bootstrap_session_id(&engine, "pin cycle");
         engine.pin_session(&id).expect("pin for unpin fixture");
 
-        let output = render_command(&engine, CliCommand::SessionUnpin { id: id.clone() });
+        let output = render_command(&engine, CliCommand::SessionUnpin { selector: id.clone() });
         let unpin: SessionUnpin =
             serde_json::from_str(&output).expect("parse session-unpin output");
         assert_eq!(unpin.unpinned_session_id.to_string(), id);
         assert!(!unpin.pinned);
         assert_eq!(
             output.replace(&id, "<session-id>"),
-            readme_output_block("session-unpin <id>", "json")
+            readme_output_block("session-unpin <selector>", "json")
         );
 
         // Session still loads, pinned flag is cleared, transcript untouched.
@@ -11643,7 +11647,7 @@ mod tests {
         let _ = render_command(
             &engine,
             CliCommand::SessionRename {
-                id: session_id.clone(),
+                selector: session_id.clone(),
                 label: "runtime-review".to_string(),
             },
         );
@@ -11985,5 +11989,548 @@ mod tests {
             rendered.contains("--limit") || rendered.contains("not-a-number"),
             "expected parse error to mention the invalid --limit value, got: {rendered}"
         );
+    }
+
+    #[test]
+    fn session_export_selector_forms_all_resolve_to_same_persisted_session_and_surface_resolved_id()
+    {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = bootstrap_session_id(&engine, "review bash");
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                selector: session_id.clone(),
+                label: "runtime-review".to_string(),
+            },
+        );
+
+        let by_raw_id = render_command(
+            &engine,
+            CliCommand::SessionExport {
+                selector: session_id.clone(),
+            },
+        );
+        let raw: SessionExport =
+            serde_json::from_str(&by_raw_id).expect("parse raw-id session-export");
+        assert_eq!(raw.exported_session_id.to_string(), session_id);
+
+        let by_latest = render_command(
+            &engine,
+            CliCommand::SessionExport {
+                selector: "latest".to_string(),
+            },
+        );
+        let latest: SessionExport =
+            serde_json::from_str(&by_latest).expect("parse latest session-export");
+        assert_eq!(latest.exported_session_id.to_string(), session_id);
+
+        let by_label = render_command(
+            &engine,
+            CliCommand::SessionExport {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let labeled: SessionExport =
+            serde_json::from_str(&by_label).expect("parse label session-export");
+        assert_eq!(labeled.exported_session_id.to_string(), session_id);
+        assert!(
+            !by_label.contains("label:runtime-review"),
+            "JSON output must not echo the selector string in place of the resolved id: {by_label}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_export_label_selector_failures_are_distinct_and_clean() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let unknown = engine.export_session("label:missing");
+        assert!(unknown.is_err(), "unknown label must fail cleanly");
+        assert!(
+            unknown.unwrap_err().contains("label:missing"),
+            "unknown-label error must echo the typed selector"
+        );
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine.rename_session(&first, "dup").expect("label first");
+        engine.rename_session(&second, "dup").expect("label second");
+        let ambiguous = engine.export_session("label:dup");
+        assert!(ambiguous.is_err(), "ambiguous label must fail cleanly");
+        assert!(
+            ambiguous.unwrap_err().contains("ambiguous session label"),
+            "ambiguous-label error must mention ambiguity"
+        );
+
+        let malformed = engine.export_session("label:");
+        assert!(malformed.is_err(), "malformed selector must fail cleanly");
+        assert!(
+            malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
+            "malformed-selector error must mention malformed selector"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_delete_label_selector_removes_resolved_session_and_surfaces_resolved_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let keeper = bootstrap_session_id(&engine, "keeper prompt");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let doomed = bootstrap_session_id(&engine, "doomed prompt");
+        engine
+            .rename_session(&doomed, "runtime-review")
+            .expect("label the doomed session");
+
+        let deletion_output = render_command(
+            &engine,
+            CliCommand::SessionDelete {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let deletion: SessionDeletion =
+            serde_json::from_str(&deletion_output).expect("parse session-delete label output");
+        assert_eq!(
+            deletion.deleted_session_id.to_string(),
+            doomed,
+            "label selector must resolve to the labeled session id"
+        );
+        assert!(
+            !deletion_output.contains("label:runtime-review"),
+            "JSON output must surface the resolved session id, not the selector: {deletion_output}"
+        );
+
+        let remaining: Vec<String> = engine
+            .list_sessions()
+            .expect("list after delete")
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(remaining, vec![keeper.clone()]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_delete_latest_selector_removes_most_recent_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let older = bootstrap_session_id(&engine, "older prompt");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer prompt");
+
+        let deletion_output = render_command(
+            &engine,
+            CliCommand::SessionDelete {
+                selector: "latest".to_string(),
+            },
+        );
+        let deletion: SessionDeletion =
+            serde_json::from_str(&deletion_output).expect("parse session-delete latest output");
+        assert_eq!(deletion.deleted_session_id.to_string(), newer);
+
+        let remaining: Vec<String> = engine
+            .list_sessions()
+            .expect("list after latest delete")
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect();
+        assert_eq!(remaining, vec![older.clone()]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_delete_label_selector_failures_are_distinct_and_clean() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let unknown = engine.delete_session("label:missing");
+        assert!(unknown.is_err(), "unknown label must fail cleanly");
+        assert!(
+            unknown.unwrap_err().contains("label:missing"),
+            "unknown-label error must echo the typed selector"
+        );
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine.rename_session(&first, "dup").expect("label first");
+        engine.rename_session(&second, "dup").expect("label second");
+        let ambiguous = engine.delete_session("label:dup");
+        assert!(ambiguous.is_err(), "ambiguous label must fail cleanly");
+        assert!(
+            ambiguous.unwrap_err().contains("ambiguous session label"),
+            "ambiguous-label error must mention ambiguity"
+        );
+
+        let malformed = engine.delete_session("label:");
+        assert!(malformed.is_err(), "malformed selector must fail cleanly");
+        assert!(
+            malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
+            "malformed-selector error must mention malformed selector"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_fork_label_selector_targets_labeled_source_and_surfaces_resolved_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let source = bootstrap_session_id(&engine, "review bash");
+        engine
+            .rename_session(&source, "runtime-review")
+            .expect("label source");
+
+        let fork_output = render_command(
+            &engine,
+            CliCommand::SessionFork {
+                selector: "label:runtime-review".to_string(),
+                prompt: "try again".to_string(),
+            },
+        );
+        let fork: SessionFork =
+            serde_json::from_str(&fork_output).expect("parse session-fork label output");
+        assert_eq!(
+            fork.source_session_id.to_string(),
+            source,
+            "label selector must resolve to the labeled source session id"
+        );
+        assert_ne!(fork.forked_session_id.to_string(), source);
+        assert!(
+            !fork_output.contains("label:runtime-review"),
+            "JSON output must not echo the selector string in place of the resolved id: {fork_output}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_fork_label_selector_failures_are_distinct_and_clean() {
+        use harness_core::Prompt;
+
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let unknown = engine.fork_session("label:missing", Prompt::new("try"));
+        assert!(unknown.is_err(), "unknown label must fail cleanly");
+        assert!(
+            unknown.unwrap_err().contains("label:missing"),
+            "unknown-label error must echo the typed selector"
+        );
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine.rename_session(&first, "dup").expect("label first");
+        engine.rename_session(&second, "dup").expect("label second");
+        let ambiguous = engine.fork_session("label:dup", Prompt::new("try"));
+        assert!(ambiguous.is_err(), "ambiguous label must fail cleanly");
+        assert!(
+            ambiguous.unwrap_err().contains("ambiguous session label"),
+            "ambiguous-label error must mention ambiguity"
+        );
+
+        let malformed = engine.fork_session("label:", Prompt::new("try"));
+        assert!(malformed.is_err(), "malformed selector must fail cleanly");
+        assert!(
+            malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
+            "malformed-selector error must mention malformed selector"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_rename_label_selector_retargets_already_labeled_session_and_surfaces_resolved_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = bootstrap_session_id(&engine, "review bash");
+        engine
+            .rename_session(&session_id, "runtime-review")
+            .expect("initial label");
+
+        let rename_output = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                selector: "label:runtime-review".to_string(),
+                label: "release-candidate".to_string(),
+            },
+        );
+        let rename: SessionRename =
+            serde_json::from_str(&rename_output).expect("parse session-rename label output");
+        assert_eq!(
+            rename.renamed_session_id.to_string(),
+            session_id,
+            "label selector must resolve to the labeled session id"
+        );
+        assert_eq!(rename.applied_label, "release-candidate");
+        assert!(
+            !rename_output.contains("label:runtime-review"),
+            "JSON output must not echo the selector string in place of the resolved id: {rename_output}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_rename_latest_selector_targets_most_recent_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer");
+
+        let rename_output = render_command(
+            &engine,
+            CliCommand::SessionRename {
+                selector: "latest".to_string(),
+                label: "runtime-review".to_string(),
+            },
+        );
+        let rename: SessionRename =
+            serde_json::from_str(&rename_output).expect("parse session-rename latest output");
+        assert_eq!(rename.renamed_session_id.to_string(), newer);
+        assert_eq!(rename.applied_label, "runtime-review");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_rename_label_selector_failures_are_distinct_and_clean() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let unknown = engine.rename_session("label:missing", "new-label");
+        assert!(unknown.is_err(), "unknown label must fail cleanly");
+        assert!(
+            unknown.unwrap_err().contains("label:missing"),
+            "unknown-label error must echo the typed selector"
+        );
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine.rename_session(&first, "dup").expect("label first");
+        engine.rename_session(&second, "dup").expect("label second");
+        let ambiguous = engine.rename_session("label:dup", "new-label");
+        assert!(ambiguous.is_err(), "ambiguous label must fail cleanly");
+        assert!(
+            ambiguous.unwrap_err().contains("ambiguous session label"),
+            "ambiguous-label error must mention ambiguity"
+        );
+
+        let malformed = engine.rename_session("label:", "new-label");
+        assert!(malformed.is_err(), "malformed selector must fail cleanly");
+        assert!(
+            malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
+            "malformed-selector error must mention malformed selector"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pin_label_selector_targets_labeled_session_and_surfaces_resolved_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = bootstrap_session_id(&engine, "review bash");
+        engine
+            .rename_session(&session_id, "runtime-review")
+            .expect("label session");
+
+        let pin_output = render_command(
+            &engine,
+            CliCommand::SessionPin {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let pin: SessionPin =
+            serde_json::from_str(&pin_output).expect("parse session-pin label output");
+        assert_eq!(
+            pin.pinned_session_id.to_string(),
+            session_id,
+            "label selector must resolve to the labeled session id"
+        );
+        assert!(pin.pinned);
+        assert!(
+            !pin_output.contains("label:runtime-review"),
+            "JSON output must not echo the selector string in place of the resolved id: {pin_output}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pin_latest_selector_targets_most_recent_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer");
+
+        let pin_output = render_command(
+            &engine,
+            CliCommand::SessionPin {
+                selector: "latest".to_string(),
+            },
+        );
+        let pin: SessionPin =
+            serde_json::from_str(&pin_output).expect("parse session-pin latest output");
+        assert_eq!(pin.pinned_session_id.to_string(), newer);
+        assert!(pin.pinned);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_pin_label_selector_failures_are_distinct_and_clean() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let unknown = engine.pin_session("label:missing");
+        assert!(unknown.is_err(), "unknown label must fail cleanly");
+        assert!(
+            unknown.unwrap_err().contains("label:missing"),
+            "unknown-label error must echo the typed selector"
+        );
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine.rename_session(&first, "dup").expect("label first");
+        engine.rename_session(&second, "dup").expect("label second");
+        let ambiguous = engine.pin_session("label:dup");
+        assert!(ambiguous.is_err(), "ambiguous label must fail cleanly");
+        assert!(
+            ambiguous.unwrap_err().contains("ambiguous session label"),
+            "ambiguous-label error must mention ambiguity"
+        );
+
+        let malformed = engine.pin_session("label:");
+        assert!(malformed.is_err(), "malformed selector must fail cleanly");
+        assert!(
+            malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
+            "malformed-selector error must mention malformed selector"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_unpin_label_selector_targets_labeled_session_and_surfaces_resolved_id() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let session_id = bootstrap_session_id(&engine, "review bash");
+        engine
+            .rename_session(&session_id, "runtime-review")
+            .expect("label session");
+        engine.pin_session(&session_id).expect("pin first");
+
+        let unpin_output = render_command(
+            &engine,
+            CliCommand::SessionUnpin {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let unpin: SessionUnpin =
+            serde_json::from_str(&unpin_output).expect("parse session-unpin label output");
+        assert_eq!(
+            unpin.unpinned_session_id.to_string(),
+            session_id,
+            "label selector must resolve to the labeled session id"
+        );
+        assert!(!unpin.pinned);
+        assert!(
+            !unpin_output.contains("label:runtime-review"),
+            "JSON output must not echo the selector string in place of the resolved id: {unpin_output}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_unpin_latest_selector_targets_most_recent_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer");
+        engine.pin_session(&newer).expect("pin latest first");
+
+        let unpin_output = render_command(
+            &engine,
+            CliCommand::SessionUnpin {
+                selector: "latest".to_string(),
+            },
+        );
+        let unpin: SessionUnpin =
+            serde_json::from_str(&unpin_output).expect("parse session-unpin latest output");
+        assert_eq!(unpin.unpinned_session_id.to_string(), newer);
+        assert!(!unpin.pinned);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_unpin_label_selector_failures_are_distinct_and_clean() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let unknown = engine.unpin_session("label:missing");
+        assert!(unknown.is_err(), "unknown label must fail cleanly");
+        assert!(
+            unknown.unwrap_err().contains("label:missing"),
+            "unknown-label error must echo the typed selector"
+        );
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine.rename_session(&first, "dup").expect("label first");
+        engine.rename_session(&second, "dup").expect("label second");
+        let ambiguous = engine.unpin_session("label:dup");
+        assert!(ambiguous.is_err(), "ambiguous label must fail cleanly");
+        assert!(
+            ambiguous.unwrap_err().contains("ambiguous session label"),
+            "ambiguous-label error must mention ambiguity"
+        );
+
+        let malformed = engine.unpin_session("label:");
+        assert!(malformed.is_err(), "malformed selector must fail cleanly");
+        assert!(
+            malformed
+                .unwrap_err()
+                .contains("malformed session selector"),
+            "malformed-selector error must mention malformed selector"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
     }
 }
