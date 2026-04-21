@@ -93,7 +93,7 @@ cargo run -p harness-cli -- --help
 
 The examples below reflect the current seeded runtime surface and are protected by `cargo test -p harness-cli`. `bootstrap` creates a session file under `.sessions/`, which is gitignored, so the README uses stable placeholders for generated values that vary per run: `<session-id>` for ids, `<created-at-ms>` and `<updated-at-ms>` for persisted recency/activity metadata, and matching `.sessions/<session-id>.json` session paths plus `.sessions/<session-id>.transcript.json` transcript paths.
 
-Each persisted session now ships a sibling transcript file at `.sessions/<session-id>.transcript.json` in a deterministic format: `{ session_id, created_at_ms, updated_at_ms, entries: [{ turn_index, prompt }] }`. Entries are appended in `turn_index` order, rewritten on every bootstrap and resume, and inspectable through `transcript-show <id>` and `transcript-show latest`.
+Each persisted session now ships a sibling transcript file at `.sessions/<session-id>.transcript.json` in a deterministic format: `{ session_id, created_at_ms, updated_at_ms, entries: [{ turn_index, prompt }] }`. Entries are appended in `turn_index` order, rewritten on every bootstrap and resume, and inspectable through `transcript-show <selector>` (raw `session_id`, `latest`, or `label:<name>`).
 
 ### `summary`
 
@@ -432,7 +432,9 @@ Pass `--limit <n>` to cap the listing to at most the newest `n` persisted sessio
 cargo run -q -p harness-cli -- sessions --limit 1
 ```
 
-### `session-show <id>`
+### `session-show <selector>`
+
+Inspect the persisted state of a single session. `<selector>` accepts any of the three forms every other single-session command accepts — a raw `session_id`, the literal `latest`, or `label:<name>` — routed through the shared selector-resolution path. Selector failure semantics are unchanged: unknown ids and unknown labels surface as `session not found`, duplicate labels surface as `ambiguous label`, and `label:` with no name surfaces as `malformed selector`. The JSON output always restates the actual resolved `session_id`, never the typed selector string.
 
 ```bash
 cargo run -q -p harness-cli -- session-show <session-id>
@@ -474,9 +476,17 @@ cargo run -q -p harness-cli -- session-show latest
 }
 ```
 
-### `transcript-show <id>`
+### `session-show label:<name>`
 
-Inspect the persisted transcript for a specific session. The output restates the owning `session_id` and the session's recency metadata so it is self-describing, and lists turns in append order.
+`label:<name>` targets the persisted session whose label was set via `session-rename`, and the output still surfaces the actual resolved `session_id` rather than the label string.
+
+```bash
+cargo run -q -p harness-cli -- session-show label:runtime-review
+```
+
+### `transcript-show <selector>`
+
+Inspect the persisted transcript for a single session. `<selector>` accepts any of the three forms every other single-session command accepts — a raw `session_id`, the literal `latest`, or `label:<name>` — routed through the shared selector-resolution path. The output restates the owning `session_id` and the session's recency metadata so it is self-describing, and lists turns in append order. Selector failure semantics are unchanged: unknown ids and unknown labels surface as `session not found`, duplicate labels surface as `ambiguous label`, and `label:` with no name surfaces as `malformed selector`.
 
 ```bash
 cargo run -q -p harness-cli -- transcript-show <session-id>
@@ -516,6 +526,14 @@ cargo run -q -p harness-cli -- transcript-show latest
     }
   ]
 }
+```
+
+### `transcript-show label:<name>`
+
+`label:<name>` targets the persisted transcript whose session was labeled via `session-rename`, and the output still surfaces the resolved `session_id` rather than the label string.
+
+```bash
+cargo run -q -p harness-cli -- transcript-show label:runtime-review
 ```
 
 ### `transcript-tail <selector>`
@@ -1621,12 +1639,12 @@ Current protected Rust surface:
 - bootstrap permission denial + session persistence behavior in `harness-runtime`
 - `harness-session` recency metadata, newest-first listing, latest-session lookup, and activity-ordered `latest` after a persisted session is resumed
 - README-backed CLI output regression coverage for `summary`, `route <prompt>`, `tools`, `commands`, and `sessions`
-- README-backed persisted-session example coverage for `bootstrap <prompt>`, `session-show <id>`, and `session-show latest`, with generated session identifiers normalized to `<session-id>` and generated recency metadata normalized to `<created-at-ms>` / `<updated-at-ms>` in test assertions
+- README-backed persisted-session example coverage for `bootstrap <prompt>`, `session-show <selector>` (raw id, `latest`, and `label:<name>`), with generated session identifiers normalized to `<session-id>` and generated recency metadata normalized to `<created-at-ms>` / `<updated-at-ms>` in test assertions
 - `harness-runtime` session resume behavior: an appended turn targets the original session id, bumps `updated_at_ms`, and emits a `SessionResumed` event; `resume latest` targets the most recently active session
 - README-backed CLI coverage for `resume <id> "review summary"` confirming the resumed turn is appended to the existing persisted session and the output exposes the targeted session id plus the appended turn index
 - `harness-session` transcript persistence: save/load round-trip preserves `turn_index` ordering, transcript files are excluded from session listings, and `latest_transcript` follows the most recently updated session
 - `harness-runtime` transcript persistence: `bootstrap` writes a transcript file alongside the session, emits a `TranscriptPersisted` event, and `resume` rewrites the transcript so `turn_index` ordering is extended in place
-- README-backed CLI coverage for `transcript-show <id>` and `transcript-show latest` confirming the output restates the owning `session_id` and preserves turn ordering
+- README-backed CLI coverage for `transcript-show <selector>` (raw id, `latest`, and `label:<name>`) confirming the output restates the owning `session_id` and preserves turn ordering, plus selector failure coverage for unknown / ambiguous / malformed label selectors on both `session-show` and `transcript-show`
 - `harness-session` `SessionExport` bundle round-trip: packages session state plus transcript, confirms the exported session id, and preserves `turn_index` ordering in the exported transcript with deterministic serialization
 - `harness-runtime` `export_session` behavior: bundles the persisted session and its transcript for an explicit id, and `latest` resolves to the same bundle
 - README-backed CLI coverage for `session-export <id>` and `session-export latest` confirming the output exposes the `exported_session_id` and preserves turn ordering
@@ -1759,7 +1777,7 @@ This repo is a clean-room implementation effort informed by architectural study.
 - [x] cleanup of obsolete Python-first scaffolding
 - [x] move retained architecture-study snapshots under `archive/reference_data/`
 - [x] CLI session resume for persisted sessions (explicit id and `latest`)
-- [x] Persisted transcript files per session and CLI transcript inspection (`transcript-show <id>` and `transcript-show latest`)
+- [x] Persisted transcript files per session and CLI transcript inspection (`transcript-show <selector>` — raw id, `latest`, and `label:<name>`)
 - [x] CLI session export for persisted session bundles (`session-export <id>` and `session-export latest`) in a deterministic JSON shape packaging session state plus transcript
 - [x] CLI session comparison for persisted sessions (`session-compare <left-id> <right-id>` with `latest` accepted on either side) in a deterministic JSON shape that identifies both compared session ids and reports signed deltas for recency metadata and transcript/turn counts
 - [x] CLI session deletion for persisted sessions (`session-delete <id>` and `session-delete latest`) that removes both the session JSON and its sibling transcript JSON in one call, with deterministic JSON output identifying the deleted session id plus the removed paths, and a clean failure when the target session does not exist
