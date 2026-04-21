@@ -493,6 +493,16 @@ pub struct SessionTranscriptEntryCount {
     pub total_entries: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptHasEntries {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub has_entries: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -851,6 +861,30 @@ impl SessionStore {
             created_at_ms: transcript.created_at_ms,
             updated_at_ms: transcript.updated_at_ms,
             total_entries: transcript.entries.len(),
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// deterministic machine-readable summary describing whether the resolved
+    /// persisted transcript contains any entries, without returning the entries
+    /// themselves. The persisted transcript is not mutated. Empty transcripts
+    /// succeed cleanly with `total_entries: 0` and `has_entries: false`.
+    /// Preserves existing selector failure semantics unchanged
+    /// (`SessionNotFound` / `AmbiguousLabel` / `MalformedSelector`).
+    pub fn has_entries_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptHasEntries, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total_entries = transcript.entries.len();
+        Ok(SessionTranscriptHasEntries {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries,
+            has_entries: total_entries > 0,
         })
     }
 
