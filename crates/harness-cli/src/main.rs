@@ -129,6 +129,9 @@ enum CliCommand {
         #[arg(long)]
         turn: usize,
     },
+    TranscriptTurnIndexes {
+        selector: String,
+    },
 }
 
 fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
@@ -323,6 +326,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("turn-exists persisted session transcript");
             serde_json::to_string_pretty(&turn_exists).expect("serialize transcript turn-exists")
         }
+        CliCommand::TranscriptTurnIndexes { selector } => {
+            let turn_indexes = engine
+                .turn_indexes_session_transcript(&selector)
+                .expect("turn-indexes persisted session transcript");
+            serde_json::to_string_pretty(&turn_indexes)
+                .expect("serialize transcript turn-indexes")
+        }
     }
 }
 
@@ -344,7 +354,8 @@ mod tests {
         SessionRetag, SessionSelectorCheck, SessionState, SessionStore, SessionTranscriptContext,
         SessionTranscriptEntryCount, SessionTranscriptFind, SessionTranscriptFirstTurn,
         SessionTranscriptHasEntries, SessionTranscriptLastTurn, SessionTranscriptRange,
-        SessionTranscriptTail, SessionTranscriptTurnExists, SessionTranscriptTurnShow,
+        SessionTranscriptTail, SessionTranscriptTurnExists, SessionTranscriptTurnIndexes,
+        SessionTranscriptTurnShow,
         SessionUnlabel, SessionUnpin, TranscriptRecord, DEFAULT_TRANSCRIPT_CONTEXT_WINDOW,
         DEFAULT_TRANSCRIPT_RANGE_COUNT, DEFAULT_TRANSCRIPT_TAIL_COUNT,
     };
@@ -5829,6 +5840,220 @@ mod tests {
 
         let err = engine
             .turn_exists_session_transcript("label:", 0)
+            .expect_err("empty label should fail");
+        assert!(
+            err.contains("malformed session selector"),
+            "expected malformed session selector error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_raw_id_returns_ascending_indexes_and_leaves_persisted_state_untouched(
+    ) {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let before_session = engine.load_session(&id).expect("reload session");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTurnIndexes {
+                selector: id.clone(),
+            },
+        );
+        let turn_indexes: SessionTranscriptTurnIndexes =
+            serde_json::from_str(&output).expect("parse transcript-turn-indexes output");
+
+        assert_eq!(turn_indexes.selector, id);
+        assert_eq!(
+            turn_indexes.resolved_session_id.to_string(),
+            turn_indexes.selector
+        );
+        assert_eq!(turn_indexes.total_entries, 3);
+        assert_eq!(turn_indexes.turn_indexes, vec![0, 1, 2]);
+        assert_eq!(turn_indexes.created_at_ms, before_transcript.created_at_ms);
+        assert_eq!(turn_indexes.updated_at_ms, before_transcript.updated_at_ms);
+
+        let after_transcript = engine
+            .load_transcript(&turn_indexes.selector)
+            .expect("reload after turn-indexes");
+        assert_eq!(after_transcript, before_transcript);
+        let after_session = engine
+            .load_session(&turn_indexes.selector)
+            .expect("reload session after turn-indexes");
+        assert_eq!(after_session, before_session);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_latest_selector_targets_most_recently_active_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer first");
+        extend_transcript(&engine, &newer, &["newer follow-up"]);
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTurnIndexes {
+                selector: "latest".to_string(),
+            },
+        );
+        let turn_indexes: SessionTranscriptTurnIndexes =
+            serde_json::from_str(&output).expect("parse transcript-turn-indexes latest output");
+
+        assert_eq!(turn_indexes.selector, "latest");
+        assert_eq!(turn_indexes.resolved_session_id.to_string(), newer);
+        assert_eq!(turn_indexes.total_entries, 2);
+        assert_eq!(turn_indexes.turn_indexes, vec![0, 1]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_label_selector_resolves_to_labeled_session() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled first");
+        extend_transcript(&engine, &id, &["labeled follow-up"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for turn-indexes");
+
+        let output = render_command(
+            &engine,
+            CliCommand::TranscriptTurnIndexes {
+                selector: "label:runtime-review".to_string(),
+            },
+        );
+        let turn_indexes: SessionTranscriptTurnIndexes =
+            serde_json::from_str(&output).expect("parse transcript-turn-indexes label output");
+
+        assert_eq!(turn_indexes.selector, "label:runtime-review");
+        assert_eq!(turn_indexes.resolved_session_id.to_string(), id);
+        assert_eq!(turn_indexes.total_entries, 2);
+        assert_eq!(turn_indexes.turn_indexes, vec![0, 1]);
+
+        let reloaded = engine.load_session(&id).expect("reload after turn-indexes");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_empty_transcript_returns_empty_array_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let mut session = SessionState::default();
+        session.messages.clear();
+        let session_id = session.session_id.to_string();
+        engine.store.save(&session).expect("persist empty session");
+        let empty_transcript = TranscriptRecord {
+            session_id: session.session_id.clone(),
+            created_at_ms: session.created_at_ms,
+            updated_at_ms: session.updated_at_ms,
+            entries: Vec::new(),
+        };
+        engine
+            .store
+            .save_transcript(&empty_transcript)
+            .expect("persist empty transcript");
+
+        let turn_indexes = engine
+            .turn_indexes_session_transcript(&session_id)
+            .expect("empty transcript should succeed");
+        assert_eq!(turn_indexes.selector, session_id);
+        assert_eq!(
+            turn_indexes.resolved_session_id.to_string(),
+            turn_indexes.selector
+        );
+        assert_eq!(turn_indexes.total_entries, 0);
+        assert!(turn_indexes.turn_indexes.is_empty());
+        assert_eq!(turn_indexes.created_at_ms, empty_transcript.created_at_ms);
+        assert_eq!(turn_indexes.updated_at_ms, empty_transcript.updated_at_ms);
+
+        let after = engine
+            .load_transcript(&turn_indexes.selector)
+            .expect("reload empty transcript");
+        assert_eq!(after, empty_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_unknown_id_and_label_surface_session_not_found() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .turn_indexes_session_transcript("00000000-0000-0000-0000-000000000000")
+            .expect_err("unknown id should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown id, got: {err}"
+        );
+
+        let err = engine
+            .turn_indexes_session_transcript("label:nonexistent")
+            .expect_err("unknown label should fail");
+        assert!(
+            err.contains("session not found"),
+            "expected session not found for unknown label, got: {err}"
+        );
+
+        assert!(engine.load_session(&anchor).is_ok());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_duplicate_label_surfaces_ambiguous_label() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let first = bootstrap_session_id(&engine, "first dup");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = bootstrap_session_id(&engine, "second dup");
+        engine
+            .rename_session(&first, "duplicate")
+            .expect("label first");
+        engine
+            .rename_session(&second, "duplicate")
+            .expect("label second");
+
+        let err = engine
+            .turn_indexes_session_transcript("label:duplicate")
+            .expect_err("duplicate label should fail");
+        assert!(
+            err.contains("ambiguous session label"),
+            "expected ambiguous session label error, got: {err}"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_turn_indexes_empty_label_surfaces_malformed_selector() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _anchor = bootstrap_session_id(&engine, "anchor");
+
+        let err = engine
+            .turn_indexes_session_transcript("label:")
             .expect_err("empty label should fail");
         assert!(
             err.contains("malformed session selector"),
