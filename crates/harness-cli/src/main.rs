@@ -101,6 +101,8 @@ enum CliCommand {
     TranscriptFind {
         selector: String,
         query: String,
+        #[arg(long)]
+        limit: Option<usize>,
     },
     TranscriptRange {
         selector: String,
@@ -313,10 +315,18 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("tail persisted session transcript");
             serde_json::to_string_pretty(&tail).expect("serialize transcript tail")
         }
-        CliCommand::TranscriptFind { selector, query } => {
-            let find = engine
+        CliCommand::TranscriptFind {
+            selector,
+            query,
+            limit,
+        } => {
+            let mut find = engine
                 .find_in_session_transcript(&selector, &query)
                 .expect("search persisted session transcript");
+            if let Some(limit) = limit {
+                find.matches.truncate(limit);
+                find.match_count = find.matches.len();
+            }
             serde_json::to_string_pretty(&find).expect("serialize transcript find")
         }
         CliCommand::TranscriptRange {
@@ -4607,6 +4617,7 @@ mod tests {
             CliCommand::TranscriptFind {
                 selector: id.clone(),
                 query: "REVIEW".to_string(),
+                limit: None,
             },
         );
         let find: SessionTranscriptFind =
@@ -4643,6 +4654,7 @@ mod tests {
             CliCommand::TranscriptFind {
                 selector: "latest".to_string(),
                 query: "review".to_string(),
+                limit: None,
             },
         );
         let find: SessionTranscriptFind =
@@ -4675,6 +4687,7 @@ mod tests {
             CliCommand::TranscriptFind {
                 selector: "label:runtime-review".to_string(),
                 query: "review".to_string(),
+                limit: None,
             },
         );
         let find: SessionTranscriptFind =
@@ -4807,6 +4820,289 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    fn transcript_find_output(
+        engine: &RuntimeEngine,
+        selector: &str,
+        query: &str,
+        limit: Option<usize>,
+    ) -> SessionTranscriptFind {
+        let output = render_command(
+            engine,
+            CliCommand::TranscriptFind {
+                selector: selector.to_string(),
+                query: query.to_string(),
+                limit,
+            },
+        );
+        serde_json::from_str(&output).expect("parse transcript-find output")
+    }
+
+    #[test]
+    fn transcript_find_omitted_limit_preserves_current_unlimited_behavior_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(
+            &engine,
+            &id,
+            &["add summary", "review tools", "final polish", "another review"],
+        );
+
+        let baseline = render_command(
+            &engine,
+            CliCommand::TranscriptFind {
+                selector: id.clone(),
+                query: "review".to_string(),
+                limit: None,
+            },
+        );
+        let explicit_large = render_command(
+            &engine,
+            CliCommand::TranscriptFind {
+                selector: id.clone(),
+                query: "review".to_string(),
+                limit: Some(usize::MAX),
+            },
+        );
+        assert_eq!(baseline, explicit_large);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&baseline).expect("parse transcript-find baseline");
+        assert!(
+            parsed.is_object(),
+            "transcript-find must return an object, got: {baseline}"
+        );
+        assert!(parsed.get("match_count").is_some());
+        assert!(parsed.get("matches").is_some());
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_with_limit_zero_returns_match_count_zero_and_empty_matches() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "review first");
+        extend_transcript(&engine, &id, &["review second", "unrelated"]);
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let find = transcript_find_output(&engine, &id, "review", Some(0));
+        assert_eq!(find.total_entries, 3);
+        assert_eq!(find.match_count, 0);
+        assert!(find.matches.is_empty());
+
+        let unlimited = transcript_find_output(&engine, &id, "review", None);
+        assert_eq!(unlimited.match_count, 2);
+
+        let after_transcript = engine.load_transcript(&id).expect("reload after find");
+        assert_eq!(after_transcript, before_transcript);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_with_limit_one_returns_only_first_match_in_turn_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(
+            &engine,
+            &id,
+            &["add summary", "review tools", "final polish", "another review"],
+        );
+
+        let find = transcript_find_output(&engine, &id, "review", Some(1));
+        assert_eq!(find.total_entries, 5);
+        assert_eq!(find.match_count, 1);
+        assert_eq!(find.matches.len(), 1);
+        assert_eq!(find.matches[0].turn_index.0, 0);
+        assert_eq!(find.matches[0].prompt.0, "Review bash runtime");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_with_limit_smaller_than_matches_truncates_in_source_turn_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(
+            &engine,
+            &id,
+            &["add summary", "review tools", "final polish", "another review"],
+        );
+
+        let find = transcript_find_output(&engine, &id, "review", Some(2));
+        assert_eq!(find.match_count, 2);
+        let indices: Vec<usize> = find.matches.iter().map(|m| m.turn_index.0).collect();
+        assert_eq!(indices, vec![0, 2]);
+        let prompts: Vec<&str> = find.matches.iter().map(|m| m.prompt.0.as_str()).collect();
+        assert_eq!(prompts, vec!["Review bash runtime", "review tools"]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_with_limit_larger_than_matches_returns_all_matches() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(&engine, &id, &["review tools", "unrelated"]);
+
+        let find = transcript_find_output(&engine, &id, "review", Some(99));
+        assert_eq!(find.total_entries, 3);
+        assert_eq!(find.match_count, 2);
+        let indices: Vec<usize> = find.matches.iter().map(|m| m.turn_index.0).collect();
+        assert_eq!(indices, vec![0, 1]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_empty_query_with_and_without_limit_returns_empty_matches() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt"]);
+
+        for limit in [None, Some(0), Some(5)] {
+            let find = transcript_find_output(&engine, &id, "", limit);
+            assert_eq!(find.query, "");
+            assert_eq!(find.total_entries, 2);
+            assert_eq!(find.match_count, 0);
+            assert!(find.matches.is_empty());
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_no_match_query_with_and_without_limit_returns_empty_matches() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt"]);
+
+        for limit in [None, Some(0), Some(5)] {
+            let find = transcript_find_output(&engine, &id, "definitely-not-present", limit);
+            assert_eq!(find.total_entries, 2);
+            assert_eq!(find.match_count, 0);
+            assert!(find.matches.is_empty());
+        }
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_latest_selector_honors_limit() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older review");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer review");
+        extend_transcript(&engine, &newer, &["second review step", "unrelated step"]);
+
+        let find = transcript_find_output(&engine, "latest", "review", Some(1));
+        assert_eq!(find.selector, "latest");
+        assert_eq!(find.resolved_session_id.to_string(), newer);
+        assert_eq!(find.total_entries, 3);
+        assert_eq!(find.match_count, 1);
+        assert_eq!(find.matches[0].turn_index.0, 0);
+        assert_eq!(find.matches[0].prompt.0, "newer review");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_label_selector_honors_limit() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled review");
+        extend_transcript(&engine, &id, &["second review", "unrelated step"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for find");
+
+        let find = transcript_find_output(&engine, "label:runtime-review", "review", Some(1));
+        assert_eq!(find.selector, "label:runtime-review");
+        assert_eq!(find.resolved_session_id.to_string(), id);
+        assert_eq!(find.match_count, 1);
+        assert_eq!(find.matches[0].turn_index.0, 0);
+        assert_eq!(find.matches[0].prompt.0, "labeled review");
+
+        let reloaded = engine.load_session(&id).expect("reload after find");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_limit_does_not_mutate_persisted_transcript_or_metadata() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "Review bash runtime");
+        extend_transcript(&engine, &id, &["review tools", "final polish"]);
+
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let before_session = engine.load_session(&id).expect("reload session");
+
+        let _ = transcript_find_output(&engine, &id, "review", Some(0));
+        let _ = transcript_find_output(&engine, &id, "review", Some(1));
+        let _ = transcript_find_output(&engine, &id, "review", Some(99));
+
+        let after_transcript = engine.load_transcript(&id).expect("reload transcript");
+        let after_session = engine.load_session(&id).expect("reload session");
+        assert_eq!(after_transcript, before_transcript);
+        assert_eq!(after_session, before_session);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_find_invalid_limit_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-find",
+            "some-id",
+            "review",
+            "--limit",
+            "-1",
+        ])
+        .expect_err("negative --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-find",
+            "some-id",
+            "review",
+            "--limit",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
     }
 
     #[test]
