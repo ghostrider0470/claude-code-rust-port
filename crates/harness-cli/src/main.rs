@@ -38,6 +38,8 @@ enum CliCommand {
     },
     TranscriptShow {
         selector: String,
+        #[arg(long)]
+        limit: Option<usize>,
     },
     SessionExport {
         id: String,
@@ -218,10 +220,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("load session by selector");
             serde_json::to_string_pretty(&session).expect("serialize session")
         }
-        CliCommand::TranscriptShow { selector } => {
-            let transcript = engine
+        CliCommand::TranscriptShow { selector, limit } => {
+            let mut transcript = engine
                 .load_transcript(&selector)
                 .expect("load transcript by selector");
+            if let Some(limit) = limit {
+                transcript.entries.truncate(limit);
+            }
             serde_json::to_string_pretty(&transcript).expect("serialize transcript")
         }
         CliCommand::SessionExport { id } => {
@@ -1025,6 +1030,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptShow {
                 selector: session_id.clone(),
+                limit: None,
             },
         );
 
@@ -1076,6 +1082,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptShow {
                 selector: "latest".to_string(),
+                limit: None,
             },
         );
 
@@ -11646,6 +11653,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptShow {
                 selector: session_id.clone(),
+                limit: None,
             },
         );
         let raw: TranscriptRecord =
@@ -11657,6 +11665,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptShow {
                 selector: "latest".to_string(),
+                limit: None,
             },
         );
         let latest: TranscriptRecord =
@@ -11670,6 +11679,7 @@ mod tests {
             &engine,
             CliCommand::TranscriptShow {
                 selector: "label:runtime-review".to_string(),
+                limit: None,
             },
         );
         let labeled: TranscriptRecord =
@@ -11736,5 +11746,244 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    fn transcript_show_record(
+        engine: &RuntimeEngine,
+        selector: &str,
+        limit: Option<usize>,
+    ) -> TranscriptRecord {
+        let output = render_command(
+            engine,
+            CliCommand::TranscriptShow {
+                selector: selector.to_string(),
+                limit,
+            },
+        );
+        serde_json::from_str(&output).expect("parse transcript-show output")
+    }
+
+    #[test]
+    fn transcript_show_omitted_limit_preserves_unlimited_behavior_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
+
+        let baseline = render_command(
+            &engine,
+            CliCommand::TranscriptShow {
+                selector: id.clone(),
+                limit: None,
+            },
+        );
+        let explicit_large = render_command(
+            &engine,
+            CliCommand::TranscriptShow {
+                selector: id.clone(),
+                limit: Some(usize::MAX),
+            },
+        );
+        assert_eq!(
+            baseline, explicit_large,
+            "omitted --limit must match an oversized --limit exactly"
+        );
+
+        let parsed: TranscriptRecord =
+            serde_json::from_str(&baseline).expect("parse transcript-show baseline");
+        let turns: Vec<(usize, String)> = parsed
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            turns,
+            vec![
+                (0, "first prompt".to_string()),
+                (1, "second prompt".to_string()),
+                (2, "third prompt".to_string()),
+                (3, "fourth prompt".to_string()),
+            ],
+            "omitted --limit must return every entry in canonical append order"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_show_with_limit_zero_returns_empty_entries_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+        let before_transcript = engine.load_transcript(&id).expect("reload transcript");
+
+        let record = transcript_show_record(&engine, &id, Some(0));
+        assert_eq!(record.session_id.to_string(), id);
+        assert!(
+            record.entries.is_empty(),
+            "--limit 0 must return an empty entries array"
+        );
+
+        let after_transcript = engine.load_transcript(&id).expect("reload after show");
+        assert_eq!(
+            after_transcript, before_transcript,
+            "--limit 0 must not mutate the persisted transcript"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_show_raw_id_with_limit_truncates_in_append_order() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(
+            &engine,
+            &id,
+            &["second prompt", "third prompt", "fourth prompt"],
+        );
+
+        let record = transcript_show_record(&engine, &id, Some(2));
+        assert_eq!(record.session_id.to_string(), id);
+        let turns: Vec<(usize, String)> = record
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            turns,
+            vec![
+                (0, "first prompt".to_string()),
+                (1, "second prompt".to_string()),
+            ],
+            "--limit <n> must truncate to the first n entries in canonical append order"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_show_latest_selector_honors_limit() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "older transcript");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "newer first");
+        extend_transcript(&engine, &newer, &["newer second", "newer third"]);
+
+        let record = transcript_show_record(&engine, "latest", Some(1));
+        assert_eq!(
+            record.session_id.to_string(),
+            newer,
+            "latest must resolve to the most recent persisted session"
+        );
+        assert_eq!(record.entries.len(), 1);
+        assert_eq!(record.entries[0].turn_index.0, 0);
+        assert_eq!(record.entries[0].prompt.0, "newer first");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_show_label_selector_honors_limit() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "labeled first");
+        extend_transcript(&engine, &id, &["labeled second", "labeled third"]);
+        engine
+            .rename_session(&id, "runtime-review")
+            .expect("attach label for transcript-show");
+
+        let record = transcript_show_record(&engine, "label:runtime-review", Some(2));
+        assert_eq!(record.session_id.to_string(), id);
+        let turns: Vec<(usize, String)> = record
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            turns,
+            vec![
+                (0, "labeled first".to_string()),
+                (1, "labeled second".to_string()),
+            ]
+        );
+
+        let reloaded = engine.load_session(&id).expect("reload after transcript-show");
+        assert_eq!(reloaded.label.as_deref(), Some("runtime-review"));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_show_limit_larger_than_total_returns_all_entries() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let id = bootstrap_session_id(&engine, "first prompt");
+        extend_transcript(&engine, &id, &["second prompt", "third prompt"]);
+
+        let record = transcript_show_record(&engine, &id, Some(99));
+        assert_eq!(record.session_id.to_string(), id);
+        let turns: Vec<(usize, String)> = record
+            .entries
+            .iter()
+            .map(|entry| (entry.turn_index.0, entry.prompt.0.clone()))
+            .collect();
+        assert_eq!(
+            turns,
+            vec![
+                (0, "first prompt".to_string()),
+                (1, "second prompt".to_string()),
+                (2, "third prompt".to_string()),
+            ],
+            "oversized --limit must return every persisted entry cleanly"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn transcript_show_invalid_limit_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-show",
+            "some-id",
+            "--limit",
+            "-1",
+        ])
+        .expect_err("negative --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "transcript-show",
+            "some-id",
+            "--limit",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
     }
 }
