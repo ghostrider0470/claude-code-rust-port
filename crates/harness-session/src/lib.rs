@@ -567,6 +567,23 @@ pub struct SessionTranscriptTurnDensity {
     pub turn_density: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptGapRange {
+    pub start_turn_index: usize,
+    pub end_turn_index: usize,
+    pub missing_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptGapRanges {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub gap_ranges: Vec<SessionTranscriptGapRange>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -1166,6 +1183,69 @@ impl SessionStore {
             span_entry_count,
             missing_turn_count,
             turn_density,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// deterministic machine-readable summary describing every contiguous run
+    /// of missing integer `turn_index` values between the smallest and largest
+    /// present `turn_index` values in the resolved persisted transcript, in
+    /// ascending order, without returning transcript entries. Each range
+    /// reports its inclusive `start_turn_index`, inclusive `end_turn_index`,
+    /// and `missing_count`. Single missing turns collapse to ranges where
+    /// `start_turn_index == end_turn_index` and `missing_count == 1`. Adjacent
+    /// missing turns collapse into a single range; disjoint gaps produce
+    /// multiple ascending ranges. Empty transcripts, single-entry transcripts,
+    /// and contiguous transcripts succeed cleanly with `gap_ranges: []`. The
+    /// persisted transcript is not mutated. Preserves existing selector
+    /// failure semantics unchanged (`SessionNotFound` / `AmbiguousLabel` /
+    /// `MalformedSelector`).
+    pub fn gap_ranges_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptGapRanges, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total_entries = transcript.entries.len();
+        let present: std::collections::HashSet<usize> = transcript
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .collect();
+        let mut gap_ranges: Vec<SessionTranscriptGapRange> = Vec::new();
+        if let (Some(&min), Some(&max)) = (present.iter().min(), present.iter().max()) {
+            let mut current: Option<(usize, usize)> = None;
+            for idx in min..=max {
+                if present.contains(&idx) {
+                    if let Some((start, end)) = current.take() {
+                        gap_ranges.push(SessionTranscriptGapRange {
+                            start_turn_index: start,
+                            end_turn_index: end,
+                            missing_count: end - start + 1,
+                        });
+                    }
+                } else {
+                    current = Some(match current {
+                        Some((start, _)) => (start, idx),
+                        None => (idx, idx),
+                    });
+                }
+            }
+            if let Some((start, end)) = current {
+                gap_ranges.push(SessionTranscriptGapRange {
+                    start_turn_index: start,
+                    end_turn_index: end,
+                    missing_count: end - start + 1,
+                });
+            }
+        }
+        Ok(SessionTranscriptGapRanges {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries,
+            gap_ranges,
         })
     }
 

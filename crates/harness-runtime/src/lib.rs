@@ -7,11 +7,11 @@ use harness_session::{
     SessionFork, SessionImport, SessionLabelEntry, SessionListing, SessionPin, SessionPinEntry,
     SessionPrune, SessionRename, SessionRetag, SessionSelectorCheck, SessionState, SessionStore,
     SessionTranscriptContext, SessionTranscriptEntryCount, SessionTranscriptFind,
-    SessionTranscriptFirstTurn, SessionTranscriptHasEntries, SessionTranscriptHasTurnGaps,
-    SessionTranscriptLastTurn, SessionTranscriptMissingTurnIndexes, SessionTranscriptRange,
-    SessionTranscriptTail, SessionTranscriptTurnDensity, SessionTranscriptTurnExists,
-    SessionTranscriptTurnIndexes, SessionTranscriptTurnRange, SessionTranscriptTurnShow,
-    SessionUnlabel, SessionUnpin, TranscriptRecord, TranscriptStore,
+    SessionTranscriptFirstTurn, SessionTranscriptGapRanges, SessionTranscriptHasEntries,
+    SessionTranscriptHasTurnGaps, SessionTranscriptLastTurn, SessionTranscriptMissingTurnIndexes,
+    SessionTranscriptRange, SessionTranscriptTail, SessionTranscriptTurnDensity,
+    SessionTranscriptTurnExists, SessionTranscriptTurnIndexes, SessionTranscriptTurnRange,
+    SessionTranscriptTurnShow, SessionUnlabel, SessionUnpin, TranscriptRecord, TranscriptStore,
 };
 use harness_tools::{PermissionPolicy, ToolRegistry, ToolResult};
 use serde::Serialize;
@@ -645,6 +645,15 @@ impl RuntimeEngine {
     ) -> Result<SessionTranscriptTurnDensity, String> {
         self.store
             .turn_density_transcript(selector)
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn gap_ranges_session_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptGapRanges, String> {
+        self.store
+            .gap_ranges_transcript(selector)
             .map_err(|err| err.to_string())
     }
 
