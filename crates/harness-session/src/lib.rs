@@ -611,6 +611,23 @@ pub struct SessionTranscriptLargestGap {
     pub largest_gap: Option<SessionTranscriptLargestGapRun>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptSmallestGapRun {
+    pub start_turn_index: usize,
+    pub end_turn_index: usize,
+    pub missing_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptSmallestGap {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub smallest_gap: Option<SessionTranscriptSmallestGapRun>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -1392,6 +1409,75 @@ impl SessionStore {
             updated_at_ms: transcript.updated_at_ms,
             total_entries,
             largest_gap,
+        })
+    }
+
+    /// Inspect-only continuity probe returning only the single smallest
+    /// contiguous run of missing integer `turn_index` values between the
+    /// smallest and largest present `turn_index` values in the resolved
+    /// persisted transcript, without returning transcript entries. When
+    /// multiple gap runs tie for the same `missing_count`, the earliest one
+    /// (lowest `start_turn_index`) wins deterministically. Single missing
+    /// turns collapse to a range where `start_turn_index == end_turn_index`
+    /// and `missing_count == 1`. Empty transcripts, single-entry transcripts,
+    /// and contiguous transcripts succeed cleanly with `smallest_gap: None`.
+    /// The persisted transcript is not mutated. Preserves existing selector
+    /// failure semantics unchanged (`SessionNotFound` / `AmbiguousLabel` /
+    /// `MalformedSelector`).
+    pub fn smallest_gap_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptSmallestGap, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total_entries = transcript.entries.len();
+        let present: std::collections::HashSet<usize> = transcript
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .collect();
+        let mut smallest_gap: Option<SessionTranscriptSmallestGapRun> = None;
+        if let (Some(&min), Some(&max)) = (present.iter().min(), present.iter().max()) {
+            let mut current: Option<(usize, usize)> = None;
+            let flush = |run_bounds: (usize, usize),
+                         best: &mut Option<SessionTranscriptSmallestGapRun>| {
+                let (start, end) = run_bounds;
+                let run = SessionTranscriptSmallestGapRun {
+                    start_turn_index: start,
+                    end_turn_index: end,
+                    missing_count: end - start + 1,
+                };
+                let replace = match best {
+                    Some(existing) => run.missing_count < existing.missing_count,
+                    None => true,
+                };
+                if replace {
+                    *best = Some(run);
+                }
+            };
+            for idx in min..=max {
+                if present.contains(&idx) {
+                    if let Some(bounds) = current.take() {
+                        flush(bounds, &mut smallest_gap);
+                    }
+                } else {
+                    current = Some(match current {
+                        Some((start, _)) => (start, idx),
+                        None => (idx, idx),
+                    });
+                }
+            }
+            if let Some(bounds) = current {
+                flush(bounds, &mut smallest_gap);
+            }
+        }
+        Ok(SessionTranscriptSmallestGap {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries,
+            smallest_gap,
         })
     }
 
