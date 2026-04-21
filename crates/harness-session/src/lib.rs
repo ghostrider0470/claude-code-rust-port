@@ -514,6 +514,16 @@ pub struct SessionTranscriptTurnExists {
     pub exists: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTranscriptTurnIndexes {
+    pub selector: String,
+    pub resolved_session_id: SessionId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub total_entries: usize,
+    pub turn_indexes: Vec<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
@@ -924,6 +934,36 @@ impl SessionStore {
             updated_at_ms: transcript.updated_at_ms,
             total_entries,
             exists,
+        })
+    }
+
+    /// Resolve a selector (raw id, `latest`, or `label:<name>`) and return a
+    /// deterministic machine-readable summary listing the `turn_index` values
+    /// present in the resolved persisted transcript in ascending order, without
+    /// returning transcript entry payloads. The persisted transcript is not
+    /// mutated. Empty transcripts succeed cleanly with `total_entries: 0` and
+    /// `turn_indexes: []`. Preserves existing selector failure semantics
+    /// unchanged (`SessionNotFound` / `AmbiguousLabel` / `MalformedSelector`).
+    pub fn turn_indexes_transcript(
+        &self,
+        selector: &str,
+    ) -> Result<SessionTranscriptTurnIndexes, RuntimeError> {
+        let resolved_id = self.resolve_selector(selector)?;
+        let transcript = self.load_transcript(&resolved_id)?;
+        let total_entries = transcript.entries.len();
+        let mut turn_indexes: Vec<usize> = transcript
+            .entries
+            .iter()
+            .map(|entry| entry.turn_index.0)
+            .collect();
+        turn_indexes.sort_unstable();
+        Ok(SessionTranscriptTurnIndexes {
+            selector: selector.to_string(),
+            resolved_session_id: transcript.session_id,
+            created_at_ms: transcript.created_at_ms,
+            updated_at_ms: transcript.updated_at_ms,
+            total_entries,
+            turn_indexes,
         })
     }
 
