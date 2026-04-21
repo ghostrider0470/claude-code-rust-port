@@ -54,6 +54,8 @@ enum CliCommand {
     },
     SessionFind {
         query: String,
+        #[arg(long)]
+        limit: Option<usize>,
     },
     SessionFork {
         id: String,
@@ -234,10 +236,13 @@ fn render_command(engine: &RuntimeEngine, command: CliCommand) -> String {
                 .expect("import persisted session bundle");
             serde_json::to_string_pretty(&imported).expect("serialize session import")
         }
-        CliCommand::SessionFind { query } => {
-            let results = engine
+        CliCommand::SessionFind { query, limit } => {
+            let mut results = engine
                 .find_sessions(&query)
                 .expect("search persisted sessions");
+            if let Some(limit) = limit {
+                results.truncate(limit);
+            }
             serde_json::to_string_pretty(&results).expect("serialize session find results")
         }
         CliCommand::SessionFork { id, prompt } => {
@@ -1485,6 +1490,7 @@ mod tests {
             &engine,
             CliCommand::SessionFind {
                 query: "review".to_string(),
+                limit: None,
             },
         );
 
@@ -1524,6 +1530,7 @@ mod tests {
             &engine,
             CliCommand::SessionFind {
                 query: "definitely-not-present".to_string(),
+                limit: None,
             },
         );
 
@@ -1537,6 +1544,353 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    fn session_find_ids(engine: &RuntimeEngine, query: &str, limit: Option<usize>) -> Vec<String> {
+        let output = render_command(
+            engine,
+            CliCommand::SessionFind {
+                query: query.to_string(),
+                limit,
+            },
+        );
+        let parsed: Vec<SessionFindResult> =
+            serde_json::from_str(&output).expect("parse session-find output");
+        parsed
+            .into_iter()
+            .map(|entry| entry.session_id.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn session_find_omitted_limit_preserves_current_unlimited_behavior_exactly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _older = bootstrap_session_id(&engine, "review older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _newer = bootstrap_session_id(&engine, "review newer");
+
+        let baseline = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+                limit: None,
+            },
+        );
+        let explicit_large = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+                limit: Some(usize::MAX),
+            },
+        );
+        assert_eq!(baseline, explicit_large);
+
+        // Per-row JSON shape is the bare array — no wrapper object.
+        assert!(baseline.trim_start().starts_with('['));
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_find_empty_query_returns_empty_array_with_and_without_limit() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _ = bootstrap_session_id(&engine, "review bash");
+
+        let unlimited = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: String::new(),
+                limit: None,
+            },
+        );
+        assert_eq!(unlimited, "[]");
+
+        let limited_zero = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: String::new(),
+                limit: Some(0),
+            },
+        );
+        assert_eq!(limited_zero, "[]");
+
+        let limited_large = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: String::new(),
+                limit: Some(99),
+            },
+        );
+        assert_eq!(limited_large, "[]");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_find_no_match_query_returns_empty_array_with_and_without_limit() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _ = bootstrap_session_id(&engine, "review bash");
+
+        let unlimited = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "definitely-not-present".to_string(),
+                limit: None,
+            },
+        );
+        assert_eq!(unlimited, "[]");
+
+        let limited_zero = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "definitely-not-present".to_string(),
+                limit: Some(0),
+            },
+        );
+        assert_eq!(limited_zero, "[]");
+
+        let limited_large = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "definitely-not-present".to_string(),
+                limit: Some(99),
+            },
+        );
+        assert_eq!(limited_large, "[]");
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_find_with_limit_zero_returns_empty_array_cleanly() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let _ = bootstrap_session_id(&engine, "review only one");
+
+        let output = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+                limit: Some(0),
+            },
+        );
+        assert_eq!(output, "[]");
+
+        // The store itself is untouched — default search still returns the match.
+        assert_eq!(session_find_ids(&engine, "review", None).len(), 1);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_find_with_limit_one_returns_only_newest_preserving_ordering() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let older = bootstrap_session_id(&engine, "review older");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let newer = bootstrap_session_id(&engine, "review newer");
+
+        let limited = session_find_ids(&engine, "review", Some(1));
+        assert_eq!(limited, vec![newer.clone()]);
+
+        let unlimited = session_find_ids(&engine, "review", None);
+        assert_eq!(unlimited, vec![newer, older]);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_find_with_limit_smaller_than_match_count_returns_prefix_of_default_ordering() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        // Three matching sessions plus one non-matching middle to prove the
+        // limit slices the matched listing, not a raw ordering.
+        let a = bootstrap_session_id(&engine, "review first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let non_match = bootstrap_session_id(&engine, "unrelated middle");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "review second");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let c = bootstrap_session_id(&engine, "review third");
+
+        let unlimited = session_find_ids(&engine, "review", None);
+        assert_eq!(unlimited, vec![c.clone(), b.clone(), a.clone()]);
+        assert!(
+            !unlimited.iter().any(|id| id == &non_match),
+            "non-matching session must stay omitted in default search"
+        );
+
+        let limited = session_find_ids(&engine, "review", Some(2));
+        assert_eq!(limited, unlimited[..2].to_vec());
+        assert!(
+            !limited.iter().any(|id| id == &non_match),
+            "non-matching session must stay omitted under limiting"
+        );
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_find_with_limit_exceeding_match_count_returns_all_matching_sessions() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "review first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _non_match = bootstrap_session_id(&engine, "unrelated middle");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "review second");
+
+        let unlimited = session_find_ids(&engine, "review", None);
+        assert_eq!(unlimited, vec![b.clone(), a.clone()]);
+
+        let limited = session_find_ids(&engine, "review", Some(99));
+        assert_eq!(limited, unlimited);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_find_limit_preserves_per_row_matches_arrays_unchanged() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "review first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "review second");
+
+        let unlimited_output = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+                limit: None,
+            },
+        );
+        let unlimited: Vec<SessionFindResult> =
+            serde_json::from_str(&unlimited_output).expect("parse unlimited find output");
+        assert_eq!(unlimited.len(), 2);
+        assert_eq!(unlimited[0].session_id.to_string(), b);
+        assert_eq!(unlimited[1].session_id.to_string(), a);
+
+        let limited_output = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+                limit: Some(1),
+            },
+        );
+        let limited: Vec<SessionFindResult> =
+            serde_json::from_str(&limited_output).expect("parse limited find output");
+        assert_eq!(limited.len(), 1);
+
+        // The newest row retained under `--limit 1` carries the same
+        // `matches` array (and same recency metadata) as in the unlimited
+        // listing — limiting only truncates, it does not mutate rows.
+        assert_eq!(limited[0], unlimited[0]);
+        assert_eq!(limited[0].matches, unlimited[0].matches);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_find_limit_does_not_mutate_persisted_store() {
+        let root = temp_session_root();
+        let engine = temp_engine(&root);
+
+        let a = bootstrap_session_id(&engine, "review first");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = bootstrap_session_id(&engine, "review second");
+
+        let before_a = engine.load_session(&a).expect("load a before");
+        let before_b = engine.load_session(&b).expect("load b before");
+        let before_ta = engine.load_transcript(&a).expect("transcript a before");
+        let before_tb = engine.load_transcript(&b).expect("transcript b before");
+        let before_find = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+                limit: None,
+            },
+        );
+
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+                limit: Some(0),
+            },
+        );
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+                limit: Some(1),
+            },
+        );
+        let _ = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+                limit: Some(99),
+            },
+        );
+
+        assert_eq!(engine.load_session(&a).expect("load a after"), before_a);
+        assert_eq!(engine.load_session(&b).expect("load b after"), before_b);
+        assert_eq!(
+            engine.load_transcript(&a).expect("transcript a after"),
+            before_ta
+        );
+        assert_eq!(
+            engine.load_transcript(&b).expect("transcript b after"),
+            before_tb
+        );
+        let after_find = render_command(
+            &engine,
+            CliCommand::SessionFind {
+                query: "review".to_string(),
+                limit: None,
+            },
+        );
+        assert_eq!(after_find, before_find);
+
+        fs::remove_dir_all(&root).expect("remove temp cli test directory");
+    }
+
+    #[test]
+    fn session_find_invalid_limit_is_rejected_by_clap_parse() {
+        use clap::Parser;
+
+        let err = Cli::try_parse_from(["harness", "session-find", "review", "--limit", "-1"])
+            .expect_err("negative --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("-1"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
+
+        let err = Cli::try_parse_from([
+            "harness",
+            "session-find",
+            "review",
+            "--limit",
+            "not-a-number",
+        ])
+        .expect_err("non-numeric --limit must fail at parse time");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--limit") || rendered.contains("not-a-number"),
+            "expected parse error to mention the invalid --limit value, got: {rendered}"
+        );
     }
 
     #[test]
